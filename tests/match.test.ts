@@ -55,6 +55,11 @@ test('extractSetCodes erkennt Codes mit Regionen und korrigiert Ziffern', () => 
   assert.deepEqual(extractSetCodes('foo MP19-EN0O7 bar'), ['MP19-EN007']);
   assert.deepEqual(extractSetCodes('SDY - 006'), ['SDY-006']);
   assert.deepEqual(extractSetCodes('LOB-G0I2'), ['LOB-G012']);
+  // Nummern mit Buchstaben (echte deutsche Karte "LEDD-DEB01"); B kann auch 8 sein, das klaeren die Varianten.
+  assert.deepEqual(extractSetCodes('LEDD-DEB01'), ['LEDD-DE801']);
+  assert.deepEqual(extractSetCodes('SGX1-DEA19 SOI-DESE1'), ['SGX1-DEA19', 'SOI-DE5E1']);
+  // "DE" als "0E" verlesen
+  assert.deepEqual(extractSetCodes('LOB-0E001'), ['LOB-0E001']);
 });
 
 test('setCodeKey ignoriert die Region', () => {
@@ -62,7 +67,19 @@ test('setCodeKey ignoriert die Region', () => {
   assert.equal(setCodeKey('LOB-DE001'), 'LOB-001');
   assert.equal(setCodeKey('LOB-G001'), 'LOB-001');
   assert.equal(setCodeKey('SDY-006'), 'SDY-006');
+  assert.equal(setCodeKey('LOB-E001'), 'LOB-001');
+  assert.equal(setCodeKey('lob-de001'), 'LOB-001');
   assert.equal(setCodeKey('kein code'), null);
+});
+
+test('setCodeKey uebersetzt deutsche Codes mit Buchstaben in der Nummer auf die englischen', () => {
+  assert.equal(setCodeKey('LEDD-DEB01'), setCodeKey('LEDD-ENB01'));
+  assert.equal(setCodeKey('LEDD-DEB01'), 'LEDD-B01');
+  assert.equal(setCodeKey('SOI-DESE1'), setCodeKey('SOI-ENSE1'));
+  assert.equal(setCodeKey('IOC-SE1'), 'IOC-SE1');
+  assert.equal(setCodeKey('OP13-PT006'), 'OP13-006');
+  assert.equal(setCodeKey('LOB-0E001'), 'LOB-001');
+  assert.equal(setCodeKey('SR03-ENTKN'), null);
 });
 
 test('extractPasscodes findet 8-stellige Zahlen', () => {
@@ -100,11 +117,29 @@ test('setCodeVariants tauscht Buchstaben und Ziffern im Set-Kuerzel', () => {
   assert.deepEqual(setCodeVariants('kaputt'), ['kaputt']);
 });
 
+test('setCodeVariants stellt Buchstaben in der Nummer wieder her', () => {
+  assert.ok(setCodeVariants('LEDD-DE801').includes('LEDD-DEB01'));
+  assert.ok(setCodeVariants('SGX3-DE016').includes('SGX3-DED16'));
+  assert.ok(setCodeVariants('SOI-DE5E1').includes('SOI-DESE1'));
+  // Die letzte Stelle ist immer eine Ziffer.
+  assert.ok(!setCodeVariants('LOB-DE001').some((v) => /[A-Z]$/.test(v)));
+});
+
 test('printMatch findet Drucke auch in verlesenem Text', () => {
   assert.deepEqual(printMatch('L0B-DE0O5', ['SDY-005', 'LOB-EN005']), { index: 1, region: 'DE', dist: 0.4 });
   assert.equal(printMatch('xx LOBDE005 yy', ['LOB-EN005'])?.dist, 0);
   assert.equal(printMatch('LOB-DE006', ['LOB-EN005'])?.dist, 1);
   assert.equal(printMatch('MRD-DE060 1996', ['LOB-EN005']), null);
+});
+
+test('printMatch findet deutsche Drucke unter den englischen Codes', () => {
+  assert.deepEqual(printMatch('LEDD-DEB01', ['LEDD-ENA01', 'LEDD-ENB01']), { index: 1, region: 'DE', dist: 0 });
+  assert.equal(printMatch('LEDD-DE801', ['LEDD-ENB01'])?.dist, 0.4);
+  assert.equal(printMatch('SOI-DESE1', ['SOI-ENSE1'])?.dist, 0);
+  assert.equal(printMatch('LOB-0E005', ['LOB-EN005'])?.dist, 0);
+  assert.equal(printMatch('LEDD-DEC01', ['LEDD-ENB01'])?.dist, 1);
+  // Gleich gut: der Druck mit der gelesenen Region
+  assert.equal(printMatch('LOB-EN005', ['LOB-005', 'LOB-E005', 'LOB-EN005'])?.index, 2);
 });
 
 test('passcodeDistance vergleicht unscharf mit einem bekannten Passcode', () => {

@@ -199,18 +199,30 @@ export function matchNames(ocrText: string, entries: NameEntry[], top = 5): Name
 const DIGIT_FIX: Record<string, string> = { O: '0', Q: '0', D: '0', I: '1', L: '1', '|': '1', S: '5', B: '8', Z: '2', G: '6' };
 const fixDigits = (s: string) => s.replace(/[OQDILSBZG|]/g, (ch) => DIGIT_FIX[ch] ?? ch);
 
-/** Set-Codes wie "LOB-DE001", "MP19-EN123" oder "SDY-006" aus OCR-Text. */
+/**
+ * Set-Codes wie "LOB-DE001", "MP19-EN123", "LEDD-DEB01" oder "SDY-006" aus OCR-Text. Die Nummer hat drei Stellen, davor
+ * steht die Region (auch verlesen wie "0E"). Buchstaben in der Nummer werden zu Ziffern, setCodeVariants stellt sie wieder her.
+ */
 export function extractSetCodes(text: string): string[] {
   const t = text.toUpperCase().replace(/[–—_~]/g, '-');
-  const re = /([A-Z0-9]{2,5})\s?-\s?([A-Z]{0,2})\s?([0-9OQDILSBZG|]{3})(?![0-9])/g;
+  const re = /([A-Z0-9]{2,5})\s?-\s?([A-Z0-9]{0,2})\s?([A-Z0-9|]{3})(?![A-Z0-9|])/g;
   const out = new Set<string>();
   for (const m of t.matchAll(re)) out.add(`${m[1]}-${m[2]}${fixDigits(m[3])}`);
   return [...out];
 }
 
-/** Sprachunabhaengiger Schluessel: Regionskuerzel (EN, DE, G, ...) wird entfernt. */
+/**
+ * Set-Kuerzel, Region (EN, E, DE, G, ...; so kurz wie moeglich) und Nummer. Die Nummer endet immer auf eine Ziffer:
+ * "001", "B01" (LEDD-ENB01) oder "SE1" (SOI-ENSE1).
+ */
+const SET_CODE = /^([A-Z0-9]{2,6})-([A-Z0-9]{0,2}?)(\d{2,4}|[A-Z]\d{2}|[A-Z]{2}\d)$/;
+
+/**
+ * Sprachunabhaengiger Schluessel: Das Regionskuerzel wird entfernt, damit deutsche Codes die englischen der Datenbank
+ * finden ("LEDD-DEB01" und "LEDD-ENB01" ergeben beide "LEDD-B01").
+ */
 export function setCodeKey(code: string): string | null {
-  const m = /^([A-Z0-9]{2,6})-([A-Z]{0,2})(\d{2,4})$/.exec(code.trim().toUpperCase());
+  const m = SET_CODE.exec(code.trim().toUpperCase());
   return m ? `${m[1]}-${m[3]}` : null;
 }
 
@@ -224,8 +236,15 @@ export function extractPasscodes(text: string): number[] {
 
 const LETTER_FOR: Record<string, string> = { '0': 'O', '1': 'I', '5': 'S', '8': 'B', '2': 'Z', '6': 'G' };
 const DIGIT_FOR: Record<string, string> = { O: '0', I: '1', S: '5', B: '8', Z: '2', G: '6' };
+/** Alle Buchstaben, die extractSetCodes zu dieser Ziffer macht. */
+const LETTERS_FOR: Record<string, string> = {};
+for (const [letter, digit] of Object.entries(DIGIT_FIX)) if (letter !== '|') LETTERS_FOR[digit] = (LETTERS_FOR[digit] ?? '') + letter;
+const NUMBER_SHAPE = /^(\d{3}|[A-Z]\d{2}|[A-Z]{2}\d)$/;
 
-/** Set-Kuerzel mischen Buchstaben und Ziffern ("MP19", "RA01"): "L0B-DE005" kann auch "LOB-DE005" sein. */
+/**
+ * Set-Kuerzel mischen Buchstaben und Ziffern ("MP19", "RA01"): "L0B-DE005" kann auch "LOB-DE005" sein. In der Nummer
+ * koennen die ersten beiden Stellen Buchstaben sein: "LEDD-DE801" kann auch "LEDD-DEB01" sein.
+ */
 export function setCodeVariants(code: string): string[] {
   const m = /^([A-Z0-9]{2,6})(-.*)$/.exec(code);
   if (!m) return [code];
@@ -234,7 +253,16 @@ export function setCodeVariants(code: string): string[] {
     const alt = LETTER_FOR[ch] ?? DIGIT_FOR[ch];
     prefixes = prefixes.flatMap((p) => (alt && prefixes.length < 16 ? [p + ch, p + alt] : [p + ch]));
   }
-  return prefixes.map((p) => p + m[2]);
+  const rest = m[2];
+  const head = rest.slice(0, -3);
+  const num = rest.slice(-3);
+  const options = (ch: string) => [ch, ...(LETTERS_FOR[ch] ?? '')];
+  const nums = [num];
+  if (rest.length >= 4) {
+    for (const a of options(num[0]))
+      for (const b of options(num[1])) if ((a !== num[0] || b !== num[1]) && NUMBER_SHAPE.test(a + b + num[2])) nums.push(a + b + num[2]);
+  }
+  return nums.flatMap((n) => prefixes.map((p) => `${p}${head}${n}`));
 }
 
 /** Zeichenweiser Vergleich ab Position `at`; Verwechslungen kosten weniger. */
@@ -244,10 +272,20 @@ function windowCost(want: string, text: string, at: number, limit: number): numb
   return cost;
 }
 
+/** Wie windowCost fuer die Nummer: Wo eine Ziffer stehen muss, gilt ein verlesenes "O" als "0". */
+function numberCost(want: string, text: string, at: number, limit: number): number {
+  let cost = 0;
+  for (let k = 0; k < want.length && cost <= limit; k++) {
+    const ch = text[at + k];
+    cost += substCost(want[k], /\d/.test(want[k]) ? fixDigits(ch) : ch);
+  }
+  return cost;
+}
+
 export interface PrintHit {
   /** Index in der uebergebenen Code-Liste. */
   index: number;
-  /** Gelesenes Regionskuerzel (DE, EN, G, ...), leer bei Codes ohne Region. */
+  /** Gelesenes Regionskuerzel (DE, EN, G, ..., auch verlesen wie "0E"), leer bei Codes ohne Region. */
   region: string;
   /** 0 = exakt, < 0.5 = eine typische Verwechslung, bis 1 = ein Zeichen falsch. */
   dist: number;
@@ -255,15 +293,17 @@ export interface PrintHit {
 
 /**
  * Sucht die Drucke einer Kandidatenkarte unscharf im OCR-Text der Code-Bereiche. Anders als extractSetCodes
- * braucht das kein sauberes Muster: "L0B-DE0O5" oder "LOBDE005" passen trotzdem zu "LOB-EN005".
+ * braucht das kein sauberes Muster: "L0B-DE0O5", "LOBDE005" oder "LOB-0E005" passen trotzdem zu "LOB-EN005".
+ * Bei gleicher Naehe gewinnt der Druck mit der gelesenen Region.
  */
 export function printMatch(text: string, codes: string[]): PrintHit | null {
   const t = text.toUpperCase().replace(/[^A-Z0-9]/g, '');
   let best: PrintHit | null = null;
+  let bestSameRegion = false;
   codes.forEach((code, index) => {
-    const m = /^([A-Z0-9]{2,6})-[A-Z]{0,2}(\d{2,4})$/.exec(code.toUpperCase());
+    const m = SET_CODE.exec(code.toUpperCase());
     if (!m) return;
-    const [, prefix, num] = m;
+    const [, prefix, codeRegion, num] = m;
     for (let i = 0; i + prefix.length + num.length <= t.length; i++) {
       const dp = windowCost(prefix, t, i, 1);
       if (dp > 1) continue;
@@ -271,9 +311,12 @@ export function printMatch(text: string, codes: string[]): PrintHit | null {
         const at = i + prefix.length + r;
         if (at + num.length > t.length) break;
         const region = t.slice(i + prefix.length, at);
-        if (!/^[A-Z]*$/.test(region)) break;
-        const dist = dp + windowCost(num, fixDigits(t.slice(at, at + num.length)), 0, 1);
-        if (dist <= 1 && (!best || dist < best.dist)) best = { index, region, dist };
+        const dist = dp + numberCost(num, t, at, 1);
+        const sameRegion = region === codeRegion;
+        if (dist <= 1 && (!best || dist < best.dist || (dist === best.dist && sameRegion && !bestSameRegion))) {
+          best = { index, region, dist };
+          bestSameRegion = sameRegion;
+        }
       }
     }
   });

@@ -4,7 +4,7 @@ Yu-Gi-Oh!-Sammlung und Decks verwalten, Karten per Handykamera erfassen. Läuft 
 
 - **Sammlung**: Karten mit Druck (Set-Code, Seltenheit) und Anzahl, Cardmarket-Wert
 - **Decks**: Main/Extra/Side, Banlisten- und Größenprüfung, Abgleich mit der Sammlung (was fehlt, was kostet es), YDK-Import/-Export
-- **Scannen**: Karte ins Bild halten, fertig. Sie muss nicht genau im Rahmen liegen: Der Rahmen sucht die Karte selbst, legt sich perspektivisch auf sie (auch schräg, aus etwas Abstand oder in einer Hülle), und gelesen wird die entzerrte Karte. Die Kamera liest fortlaufend, sobald das Bild ruhig und scharf ist, Name, Set-Code, Passcode, ATK/DEF und die Rahmenfarbe und gleicht sie mit der lokalen Datenbank ab. Sichere Treffer werden direkt übernommen (grüner Haken, mit „Noch eine“ und „Rückgängig“), unsichere per Tipp. Ein Treffer nur über den Namen wird vorher durch eine zweite Lesung bestätigt.
+- **Scannen**: Karte ins Bild halten, fertig. Sie muss nicht genau im Rahmen liegen: Der Rahmen sucht die Karte selbst, legt sich perspektivisch auf sie (auch schräg, aus etwas Abstand oder in einer Hülle), und gelesen wird die entzerrte Karte. Die Kamera liest fortlaufend, sobald das Bild ruhig und scharf ist, Name, Set-Code, Passcode, ATK/DEF und die Rahmenfarbe und gleicht sie mit der lokalen Datenbank ab. Sichere Treffer werden direkt übernommen (grüner Haken, mit „Noch eine“ und „Rückgängig“), unsichere per Tipp. Ein Treffer nur über den Namen oder nur über den Set-Code wird vorher durch eine zweite Lesung bestätigt.
 - **Detailansicht**: 3D-Karte zum Drehen (Ziehen, Doppeltippen, Pfeiltasten oder Bewegungssensor) mit Holo-Schimmer je nach Seltenheit
 
 Kartendaten, Bilder und Preise stammen aus der öffentlichen API von [YGOPRODeck](https://ygoprodeck.com/api-guide/). Die komplette Datenbank (ca. 14.600 Karten, optional mit deutschen Texten) wird einmalig in IndexedDB geladen. Suche und Scan-Abgleich laufen danach lokal.
@@ -49,4 +49,4 @@ Aufbau:
 ## Hinweise
 
 - Yu-Gi-Oh! ist eine Marke von Konami. Privates Fanprojekt, nicht offiziell.
-- Die Erkennung arbeitet über den Kartennamen und, falls lesbar, Set-Code, Passcode und ATK/DEF; die Rahmenfarbe grenzt den Kartentyp ein. Deutsche Karten werden am Namen nur erkannt, wenn beim Laden die deutschen Texte aktiviert waren.
+- Die Erkennung arbeitet zuerst über Set-Code und Passcode, dazu Kartenname, ATK/DEF und Rahmenfarbe. Ein sauber gelesener Code genügt allein; widerspricht der Name klar, wird nachgefragt. Deutsche Codes werden auf die englischen der Datenbank übersetzt (`LEDD-DEB01` → `LEDD-ENB01`), gespeichert wird der englische Druck mit Set-Name, Seltenheit und Preis. Deutsche Karten werden am Namen nur erkannt, wenn beim Laden die deutschen Texte aktiviert waren; ohne sie trägt der Code die Erkennung.
