@@ -19,10 +19,12 @@ export function CardTile({ card, imageId, qty, missing, caption, onClick }: Prop
     <button className="pocket" onClick={onClick} title={name}>
       <span className="pocket-sleeve">
         <img loading="lazy" decoding="async" src={imageUrl(imageId ?? card.imageIds[0], 'small')} alt={name} />
-        {qty !== undefined && qty > 1 && <span className="pocket-qty">{qty}×</span>}
         {!!missing && <span className="pocket-missing">{missing} fehlt</span>}
       </span>
-      <span className="pocket-name">{caption ?? name}</span>
+      <span className="pocket-cap">
+        <span className="pocket-name">{caption ?? name}</span>
+        {qty !== undefined && qty > 1 && <span className="pocket-qty">{qty}×</span>}
+      </span>
     </button>
   );
 }

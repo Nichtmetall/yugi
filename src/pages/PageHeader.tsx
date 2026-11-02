@@ -24,7 +24,7 @@ export function PageHeader({ title, sub, back, actions }: Props) {
       <div className="page-actions">
         {actions}
         {!back && (
-          <button className="icon-btn" onClick={() => navigate('settings')} aria-label="Einstellungen">
+          <button className="icon-btn head-settings" onClick={() => navigate('settings')} aria-label="Einstellungen">
             <IconSettings />
           </button>
         )}

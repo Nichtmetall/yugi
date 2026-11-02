@@ -6,7 +6,7 @@ import { parseYdk } from '../lib/ydk';
 import { collectionStore, ownedCounts } from '../state/collection';
 import { createDeck, decksStore } from '../state/decks';
 import { navigate, toast } from '../state/ui';
-import { IconPlus } from '../components/Icons';
+import { IconDecks, IconPlus } from '../components/Icons';
 import { PageHeader } from './PageHeader';
 
 export function DecksPage() {
@@ -84,25 +84,35 @@ export function DecksPage() {
             const st = deckStats(d, owned);
             const cover = d.main[0] ?? d.extra[0];
             const pct = st.total ? Math.round((st.have / st.total) * 100) : 0;
+            const complete = st.total > 0 && st.missing.length === 0;
             return (
               <li key={d.id}>
                 <button className="deck-item" onClick={() => navigate(`decks/${d.id}`)}>
-                  <span className="deck-cover">{cover && <img src={imageUrl(cover, 'cropped')} alt="" loading="lazy" />}</span>
+                  <span className="deck-cover">
+                    {cover ? <img src={imageUrl(cover, 'cropped')} alt="" loading="lazy" /> : <IconDecks />}
+                  </span>
                   <span className="deck-meta">
                     <span className="deck-name">{d.name}</span>
                     <span className="deck-counts num">
-                      Main {st.counts.main}, Extra {st.counts.extra}, Side {st.counts.side}
+                      Main {st.counts.main} · Extra {st.counts.extra} · Side {st.counts.side}
                     </span>
-                    <span className="meter" aria-label={`${st.have} von ${st.total} Karten vorhanden`}>
-                      <span style={{ width: `${pct}%` }} />
-                    </span>
-                    <span className="deck-own">
-                      {st.total === 0
-                        ? 'Noch leer'
-                        : st.missing.length === 0
-                          ? 'Alle Karten vorhanden'
-                          : `${st.have} von ${st.total} vorhanden`}
-                    </span>
+                  </span>
+                  <span className="deck-own">
+                    {st.total === 0 ? (
+                      <span className="deck-own-label none">Leer</span>
+                    ) : (
+                      <>
+                        <span className={`deck-own-label${complete ? ' done' : ''}`} aria-hidden="true">
+                          {complete ? 'Komplett' : `${st.have}/${st.total}`}
+                        </span>
+                        <span className="sr-only">
+                          {complete ? 'Alle Karten vorhanden' : `${st.have} von ${st.total} Karten vorhanden`}
+                        </span>
+                        <span className={`meter${complete ? ' done' : ''}`} aria-hidden="true">
+                          <span style={{ width: `${pct}%` }} />
+                        </span>
+                      </>
+                    )}
                   </span>
                 </button>
               </li>

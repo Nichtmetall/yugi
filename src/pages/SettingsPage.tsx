@@ -96,16 +96,18 @@ export function SettingsPage() {
 
       <section className="panel">
         <h3>Scannen</h3>
-        <label className="check">
-          <input
-            type="checkbox"
-            checked={settings.autoAdd}
-            onChange={(e) => settingsStore.set((s) => ({ ...s, autoAdd: e.target.checked }))}
-          />
+        <label className="check switch-row">
           <span>
             Sichere Treffer direkt hinzufügen
             <small>Aus: Treffer werden nur angezeigt und per Tipp übernommen. Rückgängig geht in beiden Fällen.</small>
           </span>
+          <input
+            className="toggle"
+            type="checkbox"
+            role="switch"
+            checked={settings.autoAdd}
+            onChange={(e) => settingsStore.set((s) => ({ ...s, autoAdd: e.target.checked }))}
+          />
         </label>
       </section>
 

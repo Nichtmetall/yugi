@@ -17,12 +17,19 @@ export function DbSetup() {
         Für Suche und Kamera-Scan lädt die App einmalig alle Karten aus der öffentlichen YGOPRODeck-Datenbank auf dein
         Gerät. Danach funktioniert die Suche auch offline.
       </p>
-      <label className="check">
-        <input type="checkbox" checked={withGerman} disabled={busy} onChange={(e) => setWithGerman(e.target.checked)} />
+      <label className="check switch-row">
         <span>
           Deutsche Kartennamen und Texte mitladen
           <small>Nötig, um deutsche Karten am Namen zu erkennen. Etwa doppelte Datenmenge.</small>
         </span>
+        <input
+          className="toggle"
+          type="checkbox"
+          role="switch"
+          checked={withGerman}
+          disabled={busy}
+          onChange={(e) => setWithGerman(e.target.checked)}
+        />
       </label>
       <button
         className="btn primary wide"

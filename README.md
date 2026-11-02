@@ -4,7 +4,7 @@ Yu-Gi-Oh!-Sammlung und Decks verwalten, Karten per Handykamera erfassen. Läuft 
 
 - **Sammlung**: Karten mit Druck (Set-Code, Seltenheit) und Anzahl, Cardmarket-Wert
 - **Decks**: Main/Extra/Side, Banlisten- und Größenprüfung, Abgleich mit der Sammlung (was fehlt, was kostet es), YDK-Import/-Export
-- **Scannen**: Karte in den Rahmen legen, fertig. Die Kamera liest fortlaufend, sobald das Bild ruhig und scharf ist, Name, Set-Code, Passcode, ATK/DEF und die Rahmenfarbe und gleicht sie mit der lokalen Datenbank ab. Sichere Treffer werden direkt übernommen (grüner Haken, mit „Noch eine“ und „Rückgängig“), unsichere per Tipp. Ein Treffer nur über den Namen wird vorher durch eine zweite Lesung bestätigt.
+- **Scannen**: Karte ins Bild halten, fertig. Sie muss nicht genau im Rahmen liegen: Der Rahmen sucht die Karte selbst, legt sich perspektivisch auf sie (auch schräg oder aus etwas Abstand), und gelesen wird die entzerrte Karte. Die Kamera liest fortlaufend, sobald das Bild ruhig und scharf ist, Name, Set-Code, Passcode, ATK/DEF und die Rahmenfarbe und gleicht sie mit der lokalen Datenbank ab. Sichere Treffer werden direkt übernommen (grüner Haken, mit „Noch eine“ und „Rückgängig“), unsichere per Tipp. Ein Treffer nur über den Namen wird vorher durch eine zweite Lesung bestätigt.
 - **Detailansicht**: 3D-Karte zum Drehen (Ziehen, Doppeltippen, Pfeiltasten oder Bewegungssensor) mit Holo-Schimmer je nach Seltenheit
 
 Kartendaten, Bilder und Preise stammen aus der öffentlichen API von [YGOPRODeck](https://ygoprodeck.com/api-guide/). Die komplette Datenbank (ca. 14.600 Karten, optional mit deutschen Texten) wird einmalig in IndexedDB geladen. Suche und Scan-Abgleich laufen danach lokal.
@@ -42,7 +42,7 @@ Aufbau:
 
 - `src/api/ygoprodeck.ts`: API-Zugriff und Reduktion der Kartendaten
 - `src/db/cardDb.ts`: lokale Datenbank, Indizes (ID, Set-Code, Namen) und Suche
-- `src/scan/`: Kartengeometrie und Bildfunktionen (`image.ts`), Bildausschnitte und Tesseract (`ocr.ts`), Abgleich (`match.ts`) und Gesamtbewertung aller Lesungen (`recognize.ts`)
+- `src/scan/`: Kartengeometrie und Bildfunktionen (`image.ts`), Karte im Kamerabild finden und entzerren (`detect.ts`, läuft per `detectWorker.ts` im Hintergrund), Bildausschnitte und Tesseract (`ocr.ts`), Abgleich (`match.ts`) und Gesamtbewertung aller Lesungen (`recognize.ts`)
 - `src/components/Card3D.tsx` und `.card3d-*` in `src/styles.css`: 3D-Karte und Holo-Effekt
 - `public/sw.js`: Offline-Cache für App und (sofern CORS erlaubt) Kartenbilder
 

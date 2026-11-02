@@ -45,6 +45,7 @@ export const formatPrice = (n: number) => (n > 0 ? euro.format(n) : '–');
 export function banLimit(c: Card): number {
   switch (c.banTcg) {
     case 'Banned':
+    case 'Forbidden':
       return 0;
     case 'Limited':
       return 1;
@@ -57,6 +58,7 @@ export function banLimit(c: Card): number {
 
 export const BAN_LABEL: Record<string, string> = {
   Banned: 'Verboten',
+  Forbidden: 'Verboten',
   Limited: 'Limitiert (1)',
   'Semi-Limited': 'Semi-limitiert (2)',
 };
@@ -68,15 +70,43 @@ export function frameClass(frameType: string): string {
 
 const stat = (v?: number) => (v === undefined ? '' : v < 0 ? '?' : String(v));
 
-/** Einzelne Werte fuer Tags, z. B. ["Stufe 8", "ATK 3000 / DEF 2500"]. */
-export function statParts(c: Card): string[] {
-  const parts: string[] = [];
-  if (c.frameType.startsWith('xyz') && c.level !== undefined) parts.push(`Rang ${c.level}`);
-  else if (c.level !== undefined) parts.push(`Stufe ${c.level}`);
-  if (c.linkval !== undefined) parts.push(`Link ${c.linkval}`);
-  if (c.scale !== undefined) parts.push(`Skala ${c.scale}`);
-  if (c.atk !== undefined) parts.push(c.def !== undefined ? `ATK ${stat(c.atk)} / DEF ${stat(c.def)}` : `ATK ${stat(c.atk)}`);
-  return parts;
+/** Kartenwerte als Paare aus Bezeichnung und Wert, z. B. [["Stufe", "8"], ["ATK", "3000"], ["DEF", "2500"]]. */
+export function statFacts(c: Card): [string, string][] {
+  const facts: [string, string][] = [];
+  if (c.attribute) facts.push(['Attribut', c.attribute]);
+  if (c.level !== undefined) facts.push([c.frameType.startsWith('xyz') ? 'Rang' : 'Stufe', String(c.level)]);
+  if (c.linkval !== undefined) facts.push(['Link', String(c.linkval)]);
+  if (c.scale !== undefined) facts.push(['Skala', String(c.scale)]);
+  if (c.atk !== undefined) facts.push(['ATK', stat(c.atk)]);
+  if (c.def !== undefined) facts.push(['DEF', stat(c.def)]);
+  return facts;
+}
+
+const TEXT_LABEL: Record<string, string> = {
+  'Pendulum Effect': 'Pendeleffekt',
+  'Monster Effect': 'Monstereffekt',
+  'Flavor Text': 'Flavortext',
+};
+
+/** Zerlegt den Kartentext an Zeilen wie "[ Pendulum Effect ]" in benannte Abschnitte. */
+export function textSections(desc: string): { label?: string; text: string }[] {
+  const sections: { label?: string; text: string }[] = [];
+  let current: { label?: string; lines: string[] } = { lines: [] };
+  const flush = () => {
+    const text = current.lines.join('\n').trim();
+    if (text) sections.push({ label: current.label, text });
+  };
+  for (const line of desc.split('\n')) {
+    const head = /^\s*\[\s*(.+?)\s*\]\s*$/.exec(line);
+    if (head) {
+      flush();
+      current = { label: TEXT_LABEL[head[1]] ?? head[1], lines: [] };
+    } else if (!/^\s*-{6,}\s*$/.test(line)) {
+      current.lines.push(line);
+    }
+  }
+  flush();
+  return sections;
 }
 
 /** Staerke des Holo-Effekts nach Seltenheit (0..1). Auch Commons bekommen einen leichten Glanz. */

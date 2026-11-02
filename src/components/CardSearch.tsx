@@ -3,6 +3,7 @@ import type { Card } from '../types';
 import { searchCards } from '../db/cardDb';
 import { CATEGORY_LABEL, type Category } from '../lib/format';
 import { CardTile } from './CardTile';
+import { IconSearch } from './Icons';
 
 const FILTERS: (Category | 'all')[] = ['all', 'monster', 'spell', 'trap', 'extra'];
 
@@ -22,16 +23,19 @@ export function CardSearch({ onPick, autoFocus, qtyOf }: Props) {
 
   return (
     <div className="search">
-      <input
-        className="search-input"
-        type="search"
-        inputMode="search"
-        placeholder="Name, Set-Code oder Passcode"
-        value={query}
-        autoFocus={autoFocus}
-        onChange={(e) => setQuery(e.target.value)}
-        aria-label="Karten suchen"
-      />
+      <label className="field">
+        <IconSearch size={18} />
+        <input
+          className="search-input"
+          type="search"
+          inputMode="search"
+          placeholder="Name, Set-Code oder Passcode"
+          value={query}
+          autoFocus={autoFocus}
+          onChange={(e) => setQuery(e.target.value)}
+          aria-label="Karten suchen"
+        />
+      </label>
       <div className="chips" role="group" aria-label="Kartentyp">
         {FILTERS.map((f) => (
           <button key={f} className={`chip${filter === f ? ' on' : ''}`} onClick={() => setFilter(f)} aria-pressed={filter === f}>

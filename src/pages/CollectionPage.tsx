@@ -14,7 +14,7 @@ import { PageHeader } from './PageHeader';
 type Sort = 'recent' | 'name' | 'value' | 'qty';
 
 const SORT_LABEL: Record<Sort, string> = {
-  recent: 'Zuletzt hinzugefügt',
+  recent: 'Neueste',
   name: 'Name',
   value: 'Wert',
   qty: 'Anzahl',
@@ -80,7 +80,8 @@ export function CollectionPage() {
               <span key={i} />
             ))}
           </div>
-          <p>Dein Binder ist noch leer. Scanne deine erste Karte mit der Kamera oder füge sie über die Suche hinzu.</p>
+          <h2>Noch keine Karten</h2>
+          <p>Scanne deine erste Karte mit der Kamera oder füge sie über die Suche hinzu.</p>
           <div className="btn-row center">
             <button className="btn primary" onClick={() => navigate('scan')}>
               <IconCamera size={18} /> Karte scannen
@@ -100,19 +101,22 @@ export function CollectionPage() {
         title="Sammlung"
         sub={
           <>
-            {total} Karten, {groups.length} verschiedene, Cardmarket-Wert <strong>{formatPrice(value)}</strong>
+            {total} Karten · {groups.length} verschiedene · Wert <strong>{formatPrice(value)}</strong>
           </>
         }
       />
       <div className="toolbar">
-        <input
-          className="search-input"
-          type="search"
-          placeholder="In der Sammlung suchen"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          aria-label="In der Sammlung suchen"
-        />
+        <label className="field">
+          <IconSearch size={18} />
+          <input
+            className="search-input"
+            type="search"
+            placeholder="In der Sammlung suchen"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            aria-label="In der Sammlung suchen"
+          />
+        </label>
         <select value={sort} onChange={(e) => setSort(e.target.value as Sort)} aria-label="Sortierung">
           {(Object.keys(SORT_LABEL) as Sort[]).map((s) => (
             <option key={s} value={s}>
@@ -131,7 +135,7 @@ export function CollectionPage() {
       {shown.length === 0 ? (
         <p className="hint">Keine Karte in deiner Sammlung passt zu diesem Filter.</p>
       ) : (
-        <div className="grid binder">
+        <div className="grid">
           {shown.map((g) => (
             <CardTile
               key={g.card.id}

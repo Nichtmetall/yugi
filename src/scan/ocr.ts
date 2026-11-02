@@ -1,4 +1,4 @@
-import { createWorker, PSM, type Worker } from 'tesseract.js';
+import { createWorker, PSM, type Worker as TesseractWorker } from 'tesseract.js';
 import {
   backgroundColor,
   BOTTOM_REGION,
@@ -13,6 +13,8 @@ import {
   STATS_REGION,
   TEXT_REGION,
 } from './image';
+import { detectCard, warpQuad, type Quad } from './detect';
+import type { DetectRequest, DetectResponse } from './detectWorker';
 
 /** Kartenbreite beim Kopieren aus dem Video: mindestens so fein wie bisher, hoechstens so fein, dass es flott bleibt. */
 const CARD_MIN_W = 720;
@@ -29,8 +31,8 @@ export interface OcrResult {
 
 /** Zwei Worker, damit Name und Codes gleichzeitig gelesen werden und keiner die Parameter umstellen muss. */
 interface OcrWorkers {
-  name: Worker;
-  codes: Worker;
+  name: TesseractWorker;
+  codes: TesseractWorker;
 }
 
 let workersPromise: Promise<OcrWorkers> | null = null;
@@ -101,21 +103,111 @@ export function grabCard(video: HTMLVideoElement, frame: Rect, view: { w: number
   return canvas;
 }
 
-const SIG_W = 24;
-const SIG_H = 35;
-let sigCanvas: HTMLCanvasElement | null = null;
+/** Breite des Schnappschusses fuer die Kartensuche: fein genug fuer die Kanten, klein genug fuer jedes Bild. */
+const SNAP_W = 320;
 
-/** Winziges Graustufenbild des Rahmens, um Bewegung und Kartenwechsel billig zu erkennen. */
-export function frameSignature(video: HTMLVideoElement, frame: Rect, view: { w: number; h: number }): Uint8Array {
-  sigCanvas ??= Object.assign(document.createElement('canvas'), { width: SIG_W, height: SIG_H });
-  const ctx = sigCanvas.getContext('2d', { willReadFrequently: true })!;
+export interface Snapshot {
+  /** Sichtbares Sucherbild in Suchaufloesung. */
+  px: ImageData;
+  /** Sichtbarer Ausschnitt in Videopixeln. */
+  src: Rect;
+  /** CSS-Pixel im Sucher je Schnappschuss-Pixel. */
+  scale: number;
+}
+
+const snapCanvases: HTMLCanvasElement[] = [];
+function snapCanvas(level: number, width: number, height: number) {
+  const c = (snapCanvases[level] ??= document.createElement('canvas'));
+  if (c.width !== width || c.height !== height) Object.assign(c, { width, height });
+  return c;
+}
+
+/** Das sichtbare Sucherbild, verkleinert fuer die Kartensuche. */
+export function snapshot(video: HTMLVideoElement, view: { w: number; h: number }): Snapshot {
+  const src = sourceRect(video, { x: 0, y: 0, w: view.w, h: view.h }, view);
+  const width = SNAP_W;
+  const height = Math.round((SNAP_W * view.h) / view.w);
+  // Stufenweise halbieren: Manche Browser glaetten beim Verkleinern in einem Schritt kaum, dann zerfallen Kanten in
+  // Treppen und Rauschen.
+  let from: CanvasImageSource = video;
+  let r = { ...src };
+  let level = 0;
+  while (r.w > width * 2) {
+    const c = snapCanvas(level++, Math.round(r.w / 2), Math.round(r.h / 2));
+    c.getContext('2d')!.drawImage(from, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+    from = c;
+    r = { x: 0, y: 0, w: c.width, h: c.height };
+  }
+  const out = snapCanvas(level, width, height);
+  const ctx = out.getContext('2d', { willReadFrequently: true })!;
   ctx.imageSmoothingQuality = 'medium';
-  const s = sourceRect(video, frame, view);
-  ctx.drawImage(video, s.x, s.y, s.w, s.h, 0, 0, SIG_W, SIG_H);
-  const px = ctx.getImageData(0, 0, SIG_W, SIG_H).data;
-  const out = new Uint8Array(SIG_W * SIG_H);
-  for (let i = 0, j = 0; i < px.length; i += 4, j++) out[j] = (px[i] * 77 + px[i + 1] * 150 + px[i + 2] * 29) >> 8;
-  return out;
+  ctx.drawImage(from, r.x, r.y, r.w, r.h, 0, 0, width, height);
+  return { px: ctx.getImageData(0, 0, width, height), src, scale: view.w / width };
+}
+
+let detector: Worker | null | undefined;
+let detectSeq = 0;
+const pending = new Map<number, (quad: Quad | null) => void>();
+
+/** Sucht die Karte im Schnappschuss (im Hintergrund-Thread, wo moeglich). Ecken in Schnappschuss-Pixeln. */
+export function findCard(px: ImageData, prev: Quad | null): Promise<Quad | null> {
+  if (detector === undefined) {
+    try {
+      detector = new Worker(new URL('./detectWorker.ts', import.meta.url), { type: 'module' });
+      detector.onmessage = (ev: MessageEvent<DetectResponse>) => {
+        pending.get(ev.data.id)?.(ev.data.quad);
+        pending.delete(ev.data.id);
+      };
+      detector.onerror = () => {
+        // Worker laesst sich nicht laden: ab jetzt im Hauptthread suchen, offene Anfragen ohne Ergebnis beenden.
+        detector = null;
+        for (const done of pending.values()) done(null);
+        pending.clear();
+      };
+    } catch {
+      detector = null;
+    }
+  }
+  if (!detector) return Promise.resolve(detectCard(px, prev));
+  const req: DetectRequest = { id: ++detectSeq, data: px.data, width: px.width, height: px.height, prev };
+  return new Promise((resolve) => {
+    pending.set(req.id, resolve);
+    detector!.postMessage(req);
+  });
+}
+
+/**
+ * Kopiert die erkannte Karte entzerrt aus dem Video: aufrecht, im Kartenformat und in Kameraaufloesung (nicht aus dem
+ * kleinen Schnappschuss). `quad` in Schnappschuss-Pixeln.
+ */
+export function grabQuad(video: HTMLVideoElement, snap: Snapshot, quad: Quad): HTMLCanvasElement {
+  const k = snap.src.w / snap.px.width;
+  const q = quad.map((p) => ({ x: snap.src.x + p.x * k, y: snap.src.y + p.y * k })) as Quad;
+  const cardW = (Math.hypot(q[1].x - q[0].x, q[1].y - q[0].y) + Math.hypot(q[2].x - q[3].x, q[2].y - q[3].y)) / 2;
+  const width = Math.round(Math.min(CARD_MAX_W, Math.max(CARD_MIN_W, cardW)));
+  const height = Math.round(width / CARD_RATIO);
+  // Nur den umgebenden Ausschnitt kopieren, und nicht feiner als die fertige Karte.
+  const scale = Math.min(1, width / cardW);
+  const x0 = Math.max(0, Math.floor(Math.min(...q.map((p) => p.x))));
+  const y0 = Math.max(0, Math.floor(Math.min(...q.map((p) => p.y))));
+  const x1 = Math.min(video.videoWidth, Math.ceil(Math.max(...q.map((p) => p.x))));
+  const y1 = Math.min(video.videoHeight, Math.ceil(Math.max(...q.map((p) => p.y))));
+  const area = document.createElement('canvas');
+  area.width = Math.max(2, Math.round((x1 - x0) * scale));
+  area.height = Math.max(2, Math.round((y1 - y0) * scale));
+  const actx = area.getContext('2d', { willReadFrequently: true })!;
+  actx.imageSmoothingQuality = 'high';
+  actx.drawImage(video, x0, y0, x1 - x0, y1 - y0, 0, 0, area.width, area.height);
+  const local = q.map((p) => ({ x: (p.x - x0) * (area.width / (x1 - x0)), y: (p.y - y0) * (area.height / (y1 - y0)) })) as Quad;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+  const out = ctx.createImageData(width, height);
+  warpQuad(actx.getImageData(0, 0, area.width, area.height), local, out);
+  ctx.putImageData(out, 0, 0);
+  return canvas;
 }
 
 /** Mittlere Helligkeitsabweichung zweier Signaturen (0..255). */

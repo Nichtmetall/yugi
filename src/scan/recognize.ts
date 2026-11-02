@@ -21,7 +21,7 @@ export interface Candidate {
   card: Card;
   /** 0..1, ab SURE_SCORE gilt der Treffer als sicher. */
   score: number;
-  /** Log-Odds hinter `score`; der Abstand zum Zweitbesten entscheidet mit. */
+  /** Log-Odds hinter `score` (ohne den Bonus fuer wiederholte Lesungen); der Abstand zum Zweitbesten entscheidet mit. */
   logit: number;
   imageId: number;
   /** Erkannter Druck (Set-Code aus der Datenbank, mit Regionskuerzel der echten Karte). */
@@ -77,6 +77,12 @@ const merge = (acc: Level, l: Level): Level => (l > 0 || acc > 0 ? (Math.max(acc
 const CODE_WEIGHT = [-1.5, 0, 1.5, 2.8];
 const PASS_WEIGHT = [-1.5, 0, 2, 4.5];
 const STATS_WEIGHT = [-1, 0, 0.8, 2];
+/**
+ * Jede weitere Lesung, deren Name klar auf diese Karte zeigt (hoechstens zwei): Ein Name mit ein, zwei Lesefehlern
+ * bliebe sonst auch nach vielen uebereinstimmenden Lesungen unter SURE_SCORE. Nur fuer `score`, nicht fuer den Abstand
+ * zum Zweitbesten: Liest die Texterkennung einen fast gleichnamigen Namen immer gleich falsch, bleibt es unsicher.
+ */
+const VOTE_WEIGHT = 0.6;
 
 /** Rahmenfarbe: passende Gruppe leicht belohnen, klar abweichende bestrafen. */
 function typeTerm(frame: number[], group: number): number {
@@ -161,7 +167,7 @@ function evaluate(card: Card, obs: Observation[]): Candidate {
   const key = print && code > 0 ? setCodeKey(print.set.code) : null;
   return {
     card,
-    score: 1 / (1 + Math.exp(-logit)),
+    score: 1 / (1 + Math.exp(-(logit + VOTE_WEIGHT * Math.min(2, Math.max(0, nameVotes - 1))))),
     logit,
     imageId,
     setCode: key && shownCode ? shownCode : undefined,

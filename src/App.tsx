@@ -6,7 +6,7 @@ import { navigate, useRoute } from './state/ui';
 import { CardDetail } from './components/CardDetail';
 import { DbSetup } from './components/DbSetup';
 import { Toasts } from './components/Toasts';
-import { IconBinder, IconCamera, IconDecks, IconSearch } from './components/Icons';
+import { IconBinder, IconCamera, IconDecks, IconSearch, IconSettings } from './components/Icons';
 import { CollectionPage } from './pages/CollectionPage';
 import { DecksPage } from './pages/DecksPage';
 import { DeckEditorPage } from './pages/DeckEditorPage';
@@ -46,6 +46,30 @@ export function App() {
 
   return (
     <>
+      <nav className="tabbar" aria-label="Hauptnavigation">
+        <span className="brand">Kartenbinder</span>
+        {TABS.map((t) => (
+          <button
+            key={t.path}
+            className={`tab${t.path === 'scan' ? ' tab-scan' : ''}${page === t.path ? ' on' : ''}`}
+            onClick={() => navigate(t.path)}
+            aria-current={page === t.path ? 'page' : undefined}
+          >
+            <span className="tab-icon">{t.icon}</span>
+            <span className="tab-label">{t.label}</span>
+          </button>
+        ))}
+        <button
+          className={`tab tab-settings${page === 'settings' ? ' on' : ''}`}
+          onClick={() => navigate('settings')}
+          aria-label="Einstellungen"
+          aria-current={page === 'settings' ? 'page' : undefined}
+        >
+          <span className="tab-icon">
+            <IconSettings />
+          </span>
+        </button>
+      </nav>
       {status.updateAvailable && status.phase === 'ready' && (
         <div className="banner">
           <span>Neue Kartendaten verfügbar.</span>
@@ -58,19 +82,6 @@ export function App() {
       <main className="page" key={`${page}/${param ?? ''}`}>
         {content}
       </main>
-      <nav className="tabbar" aria-label="Hauptnavigation">
-        {TABS.map((t) => (
-          <button
-            key={t.path}
-            className={`tab${t.path === 'scan' ? ' tab-scan' : ''}${page === t.path ? ' on' : ''}`}
-            onClick={() => navigate(t.path)}
-            aria-current={page === t.path ? 'page' : undefined}
-          >
-            <span className="tab-icon">{t.icon}</span>
-            <span className="tab-label">{t.label}</span>
-          </button>
-        ))}
-      </nav>
       <CardDetail />
       <Toasts />
     </>

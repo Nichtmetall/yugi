@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { imageUrl } from '../api/ygoprodeck';
 import { useStore } from '../lib/store';
 import { cardName } from '../lib/format';
-import { frameSignature, getOcrWorker, grabCard, inspectCard, onOcrStatus, readCard, signatureDiff } from '../scan/ocr';
+import { findCard, getOcrWorker, grabCard, grabQuad, inspectCard, onOcrStatus, readCard, signatureDiff, snapshot } from '../scan/ocr';
+import { homography, project, quadShift, quadSignature, rectQuad, type Point, type Quad } from '../scan/detect';
 import { observe, rankCandidates, verdict, type Candidate, type Observation } from '../scan/recognize';
 import { addToCollection, changeQty } from '../state/collection';
 import { addCardToDeck, decksStore, defaultSection, removeCardFromDeck, SECTION_LABEL } from '../state/decks';
@@ -43,8 +44,31 @@ const SHARP_KEEP = 0.7;
 const GLARE = 0.04;
 /** Dauer der Haken-Animation nach dem Hinzufuegen. */
 const CHECK_MS = 900;
+/** Mittlere Eckenverschiebung (Schnappschuss-Pixel) zwischen zwei Proben, unter der eine erkannte Karte als ruhig gilt. */
+const STEADY_SHIFT = 2.5;
+/** So viele Proben ohne Karte, bis der Rahmen in die Mitte zurueckkehrt: kurze Aussetzer lassen ihn nicht flackern. */
+const LOST_TICKS = 3;
+/** Zeitkonstante, mit der der Rahmen der Karte nachgleitet. */
+const FOLLOW_MS = 70;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Umriss eines Rechtecks mit abgerundeten Ecken (im Uhrzeigersinn), fuer die Aussparung in der Abdunklung. */
+function roundedOutline(w: number, h: number, r: number): Point[] {
+  const pts: Point[] = [];
+  for (const [cx, cy, start] of [
+    [w - r, r, -90],
+    [w - r, h - r, 0],
+    [r, h - r, 90],
+    [r, r, 180],
+  ]) {
+    for (let i = 0; i <= 4; i++) {
+      const a = ((start + i * 22.5) * Math.PI) / 180;
+      pts.push({ x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
+    }
+  }
+  return pts;
+}
 const rarities = (c: Candidate) => [...new Set(c.prints.map((p) => p.rarity))];
 let entrySeq = 0;
 
@@ -71,7 +95,10 @@ export function ScanPage() {
   const viewRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const frameRef = useRef<HTMLDivElement>(null);
+  const maskRef = useRef<SVGPathElement>(null);
   const trackRef = useRef<MediaStreamTrack | null>(null);
+  /** Erkannte Karte in Sucher-Koordinaten (CSS-Pixel); null = Rahmen ruht in der Mitte. */
+  const cardQuadRef = useRef<Quad | null>(null);
 
   const [camError, setCamError] = useState('');
   const [live, setLive] = useState(false);
@@ -170,6 +197,43 @@ export function ScanPage() {
     return () => clearTimeout(t);
   }, [check]);
 
+  // Rahmen und Abdunklung folgen der erkannten Karte perspektivisch (matrix3d); ohne Karte ruhen sie in der Mitte.
+  useEffect(() => {
+    let raf = 0;
+    let shown: Quad | null = null;
+    let last = performance.now();
+    let radius: number | null = null;
+    const step = (now: number) => {
+      raf = requestAnimationFrame(step);
+      const el = frameRef.current;
+      const mask = maskRef.current;
+      const view = viewRef.current;
+      if (!el || !mask || !view) return;
+      const { offsetLeft: x, offsetTop: y, offsetWidth: w, offsetHeight: h } = el;
+      const target = cardQuadRef.current ?? rectQuad(x, y, w, h);
+      const k = 1 - Math.exp(-(now - last) / FOLLOW_MS);
+      last = now;
+      const next = shown ? (shown.map((p, i) => ({ x: p.x + (target[i].x - p.x) * k, y: p.y + (target[i].y - p.y) * k })) as Quad) : target;
+      if (shown && quadShift(next, target) < 0.05 && quadShift(shown, target) < 0.05) return; // steht still
+      shown = next;
+      if (cardQuadRef.current) el.dataset.tracking = '';
+      else delete el.dataset.tracking;
+      const m = homography(
+        rectQuad(0, 0, w, h),
+        shown.map((p) => ({ x: p.x - x, y: p.y - y })),
+      );
+      el.style.transform = `matrix3d(${m[0]},${m[3]},0,${m[6]},${m[1]},${m[4]},0,${m[7]},0,0,1,0,${m[2]},${m[5]},0,1)`;
+      radius ??= parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0;
+      const hole = roundedOutline(w, h, radius).map((p) => project(m, p.x, p.y));
+      mask.setAttribute(
+        'd',
+        `M0 0H${view.clientWidth}V${view.clientHeight}H0Z M${hole.map((p) => `${(p.x + x).toFixed(1)} ${(p.y + y).toFixed(1)}`).join('L')}Z`,
+      );
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
   const confirmAdded = () => {
     setCheck((n) => n + 1);
     navigator.vibrate?.(40);
@@ -232,12 +296,13 @@ export function ScanPage() {
     lastAutoId.current = null;
 
     const geometry = () => {
-      const view = viewRef.current?.getBoundingClientRect();
-      const frame = frameRef.current?.getBoundingClientRect();
+      const view = viewRef.current;
+      const frame = frameRef.current;
       if (!view || !frame) return null;
+      // Ruhelage des Rahmens: die Layout-Box, nicht die (der Karte folgende) transformierte.
       return {
-        frame: { x: frame.left - view.left, y: frame.top - view.top, w: frame.width, h: frame.height },
-        view: { w: view.width, h: view.height },
+        frame: { x: frame.offsetLeft, y: frame.offsetTop, w: frame.offsetWidth, h: frame.offsetHeight },
+        view: { w: view.clientWidth, h: view.clientHeight },
       };
     };
 
@@ -300,6 +365,11 @@ export function ScanPage() {
       }
     };
 
+    let prevQuad: Quad | null = null;
+    let lost = 0;
+    /** Laeuft gerade eine Texterkennung? Der Rahmen folgt der Karte trotzdem weiter. */
+    let busy = false;
+
     (async () => {
       while (!stop) {
         await sleep(TICK_MS);
@@ -307,9 +377,22 @@ export function ScanPage() {
         const g = geometry();
         if (document.hidden || detailStore.get() || !video?.videoWidth || !g) continue;
 
-        const sig = frameSignature(video, g.frame, g.view);
-        const steady = prevSig !== null && signatureDiff(sig, prevSig) < STEADY;
+        const snap = snapshot(video, g.view);
+        const quad = await findCard(snap.px, prevQuad);
+        if (stop) break;
+        if (quad) {
+          lost = 0;
+          cardQuadRef.current = quad.map((p) => ({ x: p.x * snap.scale, y: p.y * snap.scale })) as Quad;
+        } else if (++lost > LOST_TICKS) cardQuadRef.current = null;
+
+        // Bei erkannter Karte die entzerrte Karte vergleichen: Verschieben im Bild ist dann kein Kartenwechsel.
+        const s = 1 / snap.scale;
+        const sig = quadSignature(snap.px, quad ?? rectQuad(g.frame.x * s, g.frame.y * s, g.frame.w * s, g.frame.h * s));
+        const moved = quad && prevQuad ? quadShift(quad, prevQuad) : quad || prevQuad ? Infinity : 0;
+        const steady = prevSig !== null && signatureDiff(sig, prevSig) < STEADY && moved < STEADY_SHIFT;
         prevSig = sig;
+        prevQuad = quad;
+        if (busy) continue;
         const force = forceRef.current;
 
         if (!lastSig || signatureDiff(sig, lastSig) >= SAME_SCENE) {
@@ -326,7 +409,7 @@ export function ScanPage() {
         const patient = !force && performance.now() - waitingSince < MAX_WAIT_MS;
         if (!steady && patient) continue;
 
-        const card = grabCard(video, g.frame, g.view);
+        const card = quad ? grabQuad(video, snap, quad) : grabCard(video, g.frame, g.view);
         const quality = inspectCard(card);
         // Ruhig, aber deutlich unschaerfer als schon gesehen (Fokus sucht noch): auf ein besseres Bild warten.
         if (patient && quality.sharpness < bestSharp * SHARP_KEEP) continue;
@@ -337,12 +420,16 @@ export function ScanPage() {
           tries = 0;
           obs = [];
         }
-        await read(sig, card, quality.glare >= GLARE);
-        waitingSince = performance.now();
+        busy = true;
+        void read(sig, card, quality.glare >= GLARE).finally(() => {
+          busy = false;
+          waitingSince = performance.now();
+        });
       }
     })();
     return () => {
       stop = true;
+      cardQuadRef.current = null;
     };
   }, [live, ocrReady]);
 
@@ -373,6 +460,9 @@ export function ScanPage() {
             disabled={!live || !ocrReady}
             aria-label="Karte neu lesen"
           />
+          <svg className="scan-mask" aria-hidden="true">
+            <path ref={maskRef} fillRule="evenodd" />
+          </svg>
           <div className={`scan-frame${reading ? ' reading' : ''}${locked ? ' locked' : ''}`} ref={frameRef}>
             <span className="frame-name" />
             <span className="frame-code" />
@@ -429,7 +519,7 @@ export function ScanPage() {
             </div>
           ) : (
             <div className="dock-msg" key="idle">
-              <strong>{reading ? 'Lese Karte …' : 'Karte in den Rahmen legen'}</strong>
+              <strong>{reading ? 'Lese Karte …' : 'Karte ins Bild halten'}</strong>
               <span>
                 {settings.autoAdd
                   ? `Erkannte Karten kommen direkt in ${targetName}.`
