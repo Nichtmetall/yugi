@@ -4,6 +4,7 @@ import {
   extractPasscodes,
   extractSetCodes,
   extractStats,
+  findSetCodes,
   levenshtein,
   matchNames,
   normalizeName,
@@ -130,6 +131,21 @@ test('printMatch findet Drucke auch in verlesenem Text', () => {
   assert.equal(printMatch('xx LOBDE005 yy', ['LOB-EN005'])?.dist, 0);
   assert.equal(printMatch('LOB-DE006', ['LOB-EN005'])?.dist, 1);
   assert.equal(printMatch('MRD-DE060 1996', ['LOB-EN005']), null);
+});
+
+test('findSetCodes liest Set-Codes aus verrauschtem OCR-Text echter Fotos', () => {
+  const known = new Set(['SDWD', 'YSYR', 'SBLS', 'MP25', 'LOB', 'LEDD']);
+  const find = (t: string) => findSetCodes(t, (p) => known.has(p));
+  assert.deepEqual(find('YSYR-DEO14 A 2'), ['YSYR-014']);
+  assert.deepEqual(find('YSY R-DEOO4 Z'), ['YSYR-004']); // Leerzeichen im Kuerzel
+  assert.deepEqual(find('YSYR-DEO1 1 KE'), ['YSYR-011']); // Leerzeichen in der Nummer
+  assert.deepEqual(find('SDWD-DEO026 G'), ['SDWD-026']); // zusaetzliches Zeichen in der Region, nicht SDWD-002
+  assert.deepEqual(find('A NN SDWD-DEQ22'), ['SDWD-022']);
+  assert.deepEqual(find('NNSDWD-DE022'), ['SDWD-022']); // Rauschen vor dem Kuerzel
+  assert.deepEqual(find('SBLS - DEQO1'), ['SBLS-001']);
+  assert.deepEqual(find('L0B-G001'), ['LOB-001']);
+  assert.deepEqual(find('LEDD-DEB01'), ['LEDD-801']); // setCodeVariants stellt "B01" wieder her
+  assert.deepEqual(find('I-EWDM D-MG /EFFEKT 2020SD/SHUEISHATV'), []);
 });
 
 test('printMatch findet deutsche Drucke unter den englischen Codes', () => {

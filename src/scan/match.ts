@@ -212,6 +212,37 @@ export function extractSetCodes(text: string): string[] {
 }
 
 /**
+ * Set-Codes auch aus unsauber gelesenem Text: Leerzeichen im Code ("YSY R-DEOO4", "YSYR-DEO1 1"), ein zusaetzliches
+ * Zeichen in der Region ("SDWD-DEO026") oder Rauschen direkt davor ("NNSDWD-DE022"). Verankert am Bindestrich; davor
+ * muss ein bekanntes Set-Kuerzel stehen (`isPrefix`), das laengste gewinnt. Die Nummer sind die letzten drei Zeichen
+ * des Worts nach dem Bindestrich. Die Region faellt weg ("SDWD-026"), sie zaehlt fuer den Abgleich nicht.
+ */
+export function findSetCodes(text: string, isPrefix: (prefix: string) => boolean): string[] {
+  const out = new Set<string>();
+  for (const line of text.toUpperCase().replace(/[–—_~]/g, '-').split('\n')) {
+    const words = line.replace(/\s*-\s*/g, '-').split(/[^A-Z0-9|-]+/);
+    words.forEach((word, i) => {
+      const [left, ...right] = word.split('-');
+      if (!right.length) return;
+      // Abgetrennte Einzelzeichen gehoeren noch zum Code: "YSY R-" bzw. "-DEO1 1".
+      const before = left.length < 4 && words[i - 1] && !words[i - 1].includes('-') ? words[i - 1] + left : left;
+      let tail = right.join('');
+      if (tail.length < 5 && (words[i + 1]?.length ?? 3) <= 2) tail += words[i + 1];
+      const region = tail.length - 3;
+      if (region < 0 || region > 3) return;
+      for (let len = Math.min(6, before.length); len >= 2; len--) {
+        const prefix = prefixVariants(before.slice(-len)).find(isPrefix);
+        if (prefix) {
+          out.add(`${prefix}-${fixDigits(tail.slice(region))}`);
+          break;
+        }
+      }
+    });
+  }
+  return [...out];
+}
+
+/**
  * Set-Kuerzel, Region (EN, E, DE, G, ...; so kurz wie moeglich) und Nummer. Die Nummer endet immer auf eine Ziffer:
  * "001", "B01" (LEDD-ENB01) oder "SE1" (SOI-ENSE1).
  */
@@ -241,6 +272,16 @@ const LETTERS_FOR: Record<string, string> = {};
 for (const [letter, digit] of Object.entries(DIGIT_FIX)) if (letter !== '|') LETTERS_FOR[digit] = (LETTERS_FOR[digit] ?? '') + letter;
 const NUMBER_SHAPE = /^(\d{3}|[A-Z]\d{2}|[A-Z]{2}\d)$/;
 
+/** Ein Set-Kuerzel mit vertauschten Buchstaben/Ziffern ("L0B" -> "L0B", "LOB"), hoechstens 16 Lesarten. */
+function prefixVariants(prefix: string): string[] {
+  let out = [''];
+  for (const ch of prefix) {
+    const alt = LETTER_FOR[ch] ?? DIGIT_FOR[ch];
+    out = out.flatMap((p) => (alt && out.length < 16 ? [p + ch, p + alt] : [p + ch]));
+  }
+  return out;
+}
+
 /**
  * Set-Kuerzel mischen Buchstaben und Ziffern ("MP19", "RA01"): "L0B-DE005" kann auch "LOB-DE005" sein. In der Nummer
  * koennen die ersten beiden Stellen Buchstaben sein: "LEDD-DE801" kann auch "LEDD-DEB01" sein.
@@ -248,11 +289,7 @@ const NUMBER_SHAPE = /^(\d{3}|[A-Z]\d{2}|[A-Z]{2}\d)$/;
 export function setCodeVariants(code: string): string[] {
   const m = /^([A-Z0-9]{2,6})(-.*)$/.exec(code);
   if (!m) return [code];
-  let prefixes = [''];
-  for (const ch of m[1]) {
-    const alt = LETTER_FOR[ch] ?? DIGIT_FOR[ch];
-    prefixes = prefixes.flatMap((p) => (alt && prefixes.length < 16 ? [p + ch, p + alt] : [p + ch]));
-  }
+  const prefixes = prefixVariants(m[1]);
   const rest = m[2];
   const head = rest.slice(0, -3);
   const num = rest.slice(-3);

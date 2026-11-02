@@ -1,9 +1,10 @@
 import type { Card, CardSet } from '../types';
-import { cardsBySetCode, getCard, getNameEntries } from '../db/cardDb';
+import { cardsBySetCode, getCard, getNameEntries, isSetPrefix } from '../db/cardDb';
 import {
   extractPasscodes,
   extractSetCodes,
   extractStats,
+  findSetCodes,
   matchNames,
   nameScore,
   normalizeName,
@@ -64,7 +65,7 @@ export function observe(ocr: OcrResult): Observation {
     nameConf: ocr.nameConf,
     hits: matchNames(ocr.name, getNameEntries(), 8),
     codes: ocr.codes,
-    setCodes: [...new Set(extractSetCodes(ocr.codes).flatMap(setCodeVariants))],
+    setCodes: [...new Set([...extractSetCodes(ocr.codes), ...findSetCodes(ocr.codes, isSetPrefix)].flatMap(setCodeVariants))],
     passcodes: extractPasscodes(ocr.codes),
     stats: extractStats(ocr.codes),
     frame: ocr.frame,
@@ -80,7 +81,7 @@ const merge = (acc: Level, l: Level): Level => (l > 0 || acc > 0 ? (Math.max(acc
 // unlesbar ist oder nur deutsch vorliegt. Ein Set-Code kann aber eine verlesene Ziffer sein (LOB-005 statt LOB-006);
 // widerspricht der Name klar, bleibt es deshalb unsicher.
 // ATK/DEF teilen sich viele Karten.
-const CODE_WEIGHT = [-1.5, 0, 1.5, 4];
+const CODE_WEIGHT = [-1.5, 0, 1.5, 4.5];
 const PASS_WEIGHT = [-1.5, 0, 2, 4.5];
 const STATS_WEIGHT = [-1, 0, 0.8, 2];
 /** Klar gelesener Name einer anderen Karte. */
@@ -92,11 +93,14 @@ const CONFLICT_WEIGHT = -2.5;
  */
 const VOTE_WEIGHT = 0.6;
 
-/** Rahmenfarbe: passende Gruppe leicht belohnen, klar abweichende bestrafen. */
+/**
+ * Rahmenfarbe: passende Gruppe leicht belohnen, abweichende nur leicht bestrafen. Auf Fotos unter Raumlicht liegt die
+ * Farbe oft daneben (Zauberkarten wirken weisslich wie Synchro); sie darf einen gelesenen Code nicht ueberstimmen.
+ */
 function typeTerm(frame: number[], group: number): number {
   const top = Math.max(...frame);
   const p = frame[group];
-  return (p === top && top >= 0.5 ? 0.5 : 0) + Math.max(-1.5, Math.log(p / top || 1e-9));
+  return (p === top && top >= 0.5 ? 0.5 : 0) + Math.max(-0.5, Math.log(p / top || 1e-9));
 }
 
 function statsLevel(s: Stats, card: Card): Level {
@@ -144,7 +148,10 @@ function evaluate(card: Card, obs: Observation[]): Candidate {
     // gegen "Prank-Kids Dropsies" mit benachbartem Set-Code).
     else if (top && top.score >= 0.9 && o.nameConf >= 60 && s <= top.score - 0.15) nameConflict = true;
 
-    const pm = printMatch(o.codes, codes);
+    // Ein gelesener Set-Code dieser Karte zaehlt als exakt; sonst unscharf im Text suchen.
+    const read = new Set(o.setCodes.map(setCodeKey));
+    const exact = card.sets.findIndex((s) => read.has(setCodeKey(s.code)));
+    const pm = exact >= 0 ? { index: exact, dist: 0 } : printMatch(o.codes, codes);
     if (pm) {
       const l: Level = pm.dist < 0.5 ? 2 : 1;
       if (l === 2) codeVotes++;
@@ -170,12 +177,13 @@ function evaluate(card: Card, obs: Observation[]): Candidate {
   // Gespeichert wird der englische Code der Datenbank: Nur dazu gibt es Set-Namen, Seltenheiten und Preise.
   const dbCode = print?.code;
   if (name > 0.5) reasons.add('Name');
-  if (code > 0 && dbCode) reasons.add(`Set-Code ${dbCode}`);
+  if (code > 0 && dbCode) reasons.add(code === 2 ? `Set-Code ${dbCode}` : 'Set-Code ähnlich');
   if (pass > 0) reasons.add('Passcode');
   if (stats > 0) reasons.add('ATK/DEF');
   if (type > 0) reasons.add('Kartentyp');
 
-  const key = dbCode && code > 0 ? setCodeKey(dbCode) : null;
+  // Nur ein sauber gelesener Code legt den Druck fest; ein unscharfer passt oft zu einem anderen Set.
+  const key = dbCode && code === 2 ? setCodeKey(dbCode) : null;
   return {
     card,
     score: 1 / (1 + Math.exp(-(logit + VOTE_WEIGHT * Math.min(2, Math.max(0, nameVotes - 1))))),

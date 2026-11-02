@@ -12,6 +12,7 @@ import {
   sharpness,
   STATS_REGION,
   TEXT_REGION,
+  textMask,
 } from './image';
 import { detectCard, warpQuad, type Quad } from './detect';
 import type { DetectRequest, DetectResponse } from './detectWorker';
@@ -277,7 +278,22 @@ function forOcr({ canvas, ctx, img }: ReturnType<typeof crop>): HTMLCanvasElemen
   return canvas;
 }
 
-/** Set-Code-Zeile, ATK/DEF und Fusszeile untereinander auf weissen Grund: ein Erkennungslauf statt drei. */
+/** Nur die freigestellte Schrift (siehe textMask): dunkle oder helle Zeichen. */
+function textOnly({ canvas, ctx, img }: ReturnType<typeof crop>, dark: boolean): HTMLCanvasElement {
+  const mask = textMask(img, dark);
+  const out = ctx.createImageData(img.width, img.height);
+  for (let i = 0, j = 0; j < mask.length; i += 4, j++) {
+    out.data[i] = out.data[i + 1] = out.data[i + 2] = mask[j];
+    out.data[i + 3] = 255;
+  }
+  const copy = document.createElement('canvas');
+  copy.width = canvas.width;
+  copy.height = canvas.height;
+  copy.getContext('2d')!.putImageData(out, 0, 0);
+  return copy;
+}
+
+/** Set-Code-Zeile, ATK/DEF und Fusszeile untereinander auf weissen Grund: ein Erkennungslauf statt mehrerer. */
 function stack(parts: HTMLCanvasElement[], gap = 24): HTMLCanvasElement {
   const out = document.createElement('canvas');
   out.width = Math.max(...parts.map((p) => p.width)) + gap * 2;
@@ -297,10 +313,15 @@ export async function readCard(card: HTMLCanvasElement): Promise<OcrResult> {
   const workers = await getOcrWorker();
   const name = crop(card, NAME_REGION, 120);
   const frame = frameProbabilities(backgroundColor(name.img));
+  // Set-Code und Passcode sind je nach Rahmen dunkel oder hell gedruckt: beide Polaritaeten lesen.
+  const setCode = crop(card, SETCODE_REGION, 256);
+  const bottom = crop(card, BOTTOM_REGION, 160);
   const codes = stack([
-    forOcr(crop(card, SETCODE_REGION, 160)),
+    textOnly(setCode, true),
+    textOnly(setCode, false),
     forOcr(crop(card, STATS_REGION, 110)),
-    forOcr(crop(card, BOTTOM_REGION, 160)),
+    textOnly(bottom, true),
+    textOnly(bottom, false),
   ]);
   const [n, c] = await Promise.all([workers.name.recognize(forOcr(name)), workers.codes.recognize(codes)]);
   return { name: n.data.text.trim(), nameConf: n.data.confidence, codes: c.data.text, frame };

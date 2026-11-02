@@ -9,6 +9,7 @@ import {
   ocrGray,
   otsu,
   sharpness,
+  textMask,
   type Pixels,
 } from '../src/scan/image.ts';
 
@@ -51,6 +52,24 @@ test('ocrGray nimmt den Farbkanal mit dem besten Kontrast', () => {
   // Gleiche Helligkeit, aber im Rotkanal klar getrennt (wie Goldschrift auf farbigem Rahmen).
   const g = ocrGray(textLike([200, 100, 100], [90, 155, 100]));
   assert.ok(g[0] - g[6 * 40 + 10] > 150);
+});
+
+test('textMask stellt Zeichen frei und verwirft Rahmenlinien, angeschnittene Teile und die andere Polaritaet', () => {
+  // Mittelgrauer Rahmen, oben eine dunkle Linie ueber die ganze Breite, rechts ein dunkles "Zeichen", links ein helles.
+  const px = image(80, 40, (x, y) => {
+    if (y === 3) return [20, 20, 20];
+    if (x >= 60 && x < 64 && y >= 15 && y < 25) return [10, 10, 10];
+    if (x >= 20 && x < 24 && y >= 15 && y < 25) return [250, 250, 250];
+    return [140, 140, 140];
+  });
+  const dark = textMask(px, true);
+  assert.equal(dark[20 * 80 + 61], 0); // dunkles Zeichen
+  assert.equal(dark[3 * 80 + 40], 255); // Linie bis an den Rand
+  assert.equal(dark[20 * 80 + 21], 255); // helles Zeichen
+  assert.equal(dark[30 * 80 + 40], 255); // Hintergrund
+  const light = textMask(px, false);
+  assert.equal(light[20 * 80 + 21], 0);
+  assert.equal(light[20 * 80 + 61], 255);
 });
 
 test('sharpness: scharfe Kanten zaehlen mehr als weiche', () => {

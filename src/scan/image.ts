@@ -11,8 +11,8 @@ export interface Region {
 }
 
 export const NAME_REGION: Region = { x: 0.05, y: 0.035, w: 0.78, h: 0.085 };
-// Set-Code sitzt bei normalen Karten rechts unter dem Artwork ...
-export const SETCODE_REGION: Region = { x: 0.45, y: 0.7, w: 0.52, h: 0.075 };
+// Set-Code sitzt bei normalen Karten rechts unter dem Artwork (bei Speed-Duel-Karten hoeher, neben "SPEED DUEL") ...
+export const SETCODE_REGION: Region = { x: 0.45, y: 0.655, w: 0.52, h: 0.12 };
 // ... bei Pendel-Karten unten links; dort steht auch immer der Passcode.
 export const BOTTOM_REGION: Region = { x: 0.0, y: 0.92, w: 0.75, h: 0.075 };
 /** "ATK/2500 DEF/2100" bzw. "ATK/2300 LINK-3" unten rechts im Textfeld. */
@@ -102,6 +102,86 @@ export function ocrGray(px: Pixels): Uint8Array {
   for (let j = 0; j < n; j++) {
     const v = Math.min(255, Math.max(0, ((gray[j] - lo) / (hi - lo)) * 255));
     out[j] = invert ? 255 - v : v;
+  }
+  return out;
+}
+
+/**
+ * Schrift fuer die Code-Bereiche freistellen: schwarz auf weiss, alles andere weiss. Ein Pixel ist Schrift, wenn es
+ * deutlich dunkler (`dark`) bzw. heller als seine Umgebung ist; eine globale Schwelle oder Polaritaet scheitert dort an
+ * Artwork-Kante, Textbox-Rahmen und Glanz. Danach fallen Teile weg, die keine Zeichen sind: am Rand angeschnitten
+ * (Rahmenlinien, Artwork, halbe Textzeilen), zu gross, zu breit oder zu klein.
+ */
+export function textMask(px: Pixels, dark: boolean): Uint8Array {
+  const { width: w, height: h, data: d } = px;
+  const n = w * h;
+  const gray = new Uint8Array(n);
+  for (let i = 0, j = 0; j < n; i += 4, j++) gray[j] = luma(d, i);
+  // Integralbild fuer den Mittelwert der Umgebung
+  const W = w + 1;
+  const sum = new Float64Array(W * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let row = 0;
+    for (let x = 0; x < w; x++) {
+      row += gray[y * w + x];
+      sum[(y + 1) * W + x + 1] = sum[y * W + x + 1] + row;
+    }
+  }
+  const hist = histogram(gray);
+  const margin = Math.max(10, 0.1 * (percentile(hist, n, 0.98) - percentile(hist, n, 0.02)));
+  const r = Math.max(4, Math.round(h * 0.06));
+  const ink = new Uint8Array(n);
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - r);
+    const y1 = Math.min(h, y + r + 1);
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - r);
+      const x1 = Math.min(w, x + r + 1);
+      const mean = (sum[y1 * W + x1] - sum[y0 * W + x1] - sum[y1 * W + x0] + sum[y0 * W + x0]) / ((x1 - x0) * (y1 - y0));
+      const v = gray[y * w + x];
+      ink[y * w + x] = dark ? +(v < mean - margin) : +(v > mean + margin);
+    }
+  }
+
+  const out = new Uint8Array(n).fill(255);
+  const seen = new Uint8Array(n);
+  const stack = new Int32Array(n);
+  const members = new Int32Array(n);
+  for (let s = 0; s < n; s++) {
+    if (!ink[s] || seen[s]) continue;
+    seen[s] = 1;
+    let top = 0;
+    let count = 0;
+    stack[top++] = s;
+    let minX = w;
+    let maxX = 0;
+    let minY = h;
+    let maxY = 0;
+    while (top) {
+      const p = stack[--top];
+      members[count++] = p;
+      const x = p % w;
+      const y = (p - x) / w;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      for (let ny = Math.max(0, y - 1); ny <= Math.min(h - 1, y + 1); ny++) {
+        for (let nx = Math.max(0, x - 1); nx <= Math.min(w - 1, x + 1); nx++) {
+          const q = ny * w + nx;
+          if (ink[q] && !seen[q]) {
+            seen[q] = 1;
+            stack[top++] = q;
+          }
+        }
+      }
+    }
+    const bw = maxX - minX + 1;
+    const bh = maxY - minY + 1;
+    const cut = minX === 0 || minY === 0 || maxX === w - 1 || maxY === h - 1;
+    const line = bh > 4 && bw > bh * 4;
+    if (cut || line || bh > h * 0.45 || bw > w * 0.25 || count < 10) continue;
+    for (let k = 0; k < count; k++) out[members[k]] = 0;
   }
   return out;
 }

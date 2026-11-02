@@ -37,11 +37,13 @@ let normDe: string[] = [];
 let nameEntries: NameEntry[] = [];
 const byId = new Map<number, Card>();
 const bySet = new Map<string, Card[]>();
+const setPrefixes = new Set<string>();
 
 function buildIndex(list: Card[]) {
   cards = [...list].sort((a, b) => a.name.localeCompare(b.name));
   byId.clear();
   bySet.clear();
+  setPrefixes.clear();
   normEn = cards.map((c) => normalizeName(c.name));
   normDe = cards.map((c) => (c.nameDe ? normalizeName(c.nameDe) : ''));
   nameEntries = [];
@@ -51,6 +53,7 @@ function buildIndex(list: Card[]) {
     for (const s of c.sets) {
       const key = setCodeKey(s.code);
       if (!key) continue;
+      setPrefixes.add(key.slice(0, key.indexOf('-')));
       const list = bySet.get(key) ?? [];
       if (!list.includes(c)) list.push(c);
       bySet.set(key, list);
@@ -140,6 +143,9 @@ export const cardsBySetCode = (code: string): Card[] => {
   const key = setCodeKey(code);
   return key ? (bySet.get(key) ?? []) : [];
 };
+
+/** Gibt es Drucke mit diesem Set-Kuerzel ("LOB", "SDWD")? */
+export const isSetPrefix = (prefix: string): boolean => setPrefixes.has(prefix);
 
 export const getNameEntries = () => nameEntries;
 
