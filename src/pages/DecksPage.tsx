@@ -62,7 +62,7 @@ export function DecksPage() {
           <input
             ref={fileRef}
             type="file"
-            accept=".ydk,text/plain"
+            // Kein accept: iOS kennt keinen Dateityp fuer .ydk und graut solche Dateien sonst aus.
             hidden
             onChange={(e) => {
               const f = e.target.files?.[0];
