@@ -4,7 +4,7 @@ Yu-Gi-Oh!-Sammlung und Decks verwalten, Karten per Handykamera erfassen. Läuft 
 
 - **Sammlung**: Karten mit Druck (Set-Code, Seltenheit) und Anzahl, Cardmarket-Wert
 - **Decks**: Main/Extra/Side, Banlisten- und Größenprüfung, Abgleich mit der Sammlung (was fehlt, was kostet es), YDK-Import/-Export
-- **Scannen**: Karte in den Rahmen halten, Texterkennung liest Name, Set-Code und Passcode und gleicht sie mit der lokalen Datenbank ab. Im Auto-Modus werden sichere Treffer direkt übernommen.
+- **Scannen**: Karte in den Rahmen legen, fertig. Die Kamera liest fortlaufend, sobald das Bild ruhig ist, Name, Set-Code und Passcode und gleicht sie mit der lokalen Datenbank ab. Sichere Treffer werden direkt übernommen (mit „Noch eine“ und „Rückgängig“), unsichere per Tipp.
 - **Detailansicht**: 3D-Karte zum Drehen (Ziehen, Doppeltippen, Pfeiltasten oder Bewegungssensor) mit Holo-Schimmer je nach Seltenheit
 
 Kartendaten, Bilder und Preise stammen aus der öffentlichen API von [YGOPRODeck](https://ygoprodeck.com/api-guide/). Die komplette Datenbank (ca. 14.600 Karten, optional mit deutschen Texten) wird einmalig in IndexedDB geladen. Suche und Scan-Abgleich laufen danach lokal.

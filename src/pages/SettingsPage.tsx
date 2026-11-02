@@ -103,8 +103,8 @@ export function SettingsPage() {
             onChange={(e) => settingsStore.set((s) => ({ ...s, autoAdd: e.target.checked }))}
           />
           <span>
-            Im Auto-Scan sichere Treffer direkt hinzufügen
-            <small>Aus: Treffer werden nur angezeigt und per Tipp übernommen.</small>
+            Sichere Treffer direkt hinzufügen
+            <small>Aus: Treffer werden nur angezeigt und per Tipp übernommen. Rückgängig geht in beiden Fällen.</small>
           </span>
         </label>
       </section>
