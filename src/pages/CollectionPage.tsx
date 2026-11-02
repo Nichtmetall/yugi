@@ -2,13 +2,14 @@ import { useDeferredValue, useMemo, useState } from 'react';
 import type { Card } from '../types';
 import { getCard } from '../db/cardDb';
 import { useStore } from '../lib/store';
-import { CATEGORY_LABEL, cardName, category, formatPrice, type Category } from '../lib/format';
+import { toCsv } from '../lib/csv';
+import { CATEGORY_LABEL, cardName, category, download, formatPrice, type Category } from '../lib/format';
 import { normalizeName } from '../scan/match';
 import { collectionStore } from '../state/collection';
 import { settingsStore } from '../state/settings';
 import { navigate, openCard } from '../state/ui';
 import { CardTile } from '../components/CardTile';
-import { IconCamera, IconSearch } from '../components/Icons';
+import { IconCamera, IconDownload, IconSearch } from '../components/Icons';
 import { PageHeader } from './PageHeader';
 
 type Sort = 'recent' | 'name' | 'value' | 'qty';
@@ -70,6 +71,13 @@ export function CollectionPage() {
     return list.sort(cmp[sort]);
   }, [groups, filter, q, sort, lang]);
 
+  const exportCsv = () => {
+    const rows = [...groups]
+      .sort((a, b) => cardName(a.card, lang).localeCompare(cardName(b.card, lang), 'de'))
+      .map((g) => [cardName(g.card, lang), g.card.id, g.qty]);
+    download('Sammlung.csv', toCsv([['Name', 'ID', 'Anzahl'], ...rows]), 'text/csv;charset=utf-8');
+  };
+
   if (groups.length === 0) {
     return (
       <>
@@ -103,6 +111,11 @@ export function CollectionPage() {
           <>
             {total} Karten · {groups.length} verschiedene · Wert <strong>{formatPrice(value)}</strong>
           </>
+        }
+        actions={
+          <button className="icon-btn" onClick={exportCsv} aria-label="Als CSV exportieren" title="Als CSV exportieren">
+            <IconDownload />
+          </button>
         }
       />
       <div className="toolbar">
