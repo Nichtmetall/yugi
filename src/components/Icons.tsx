@@ -54,6 +54,11 @@ export const IconClose = (p: P) => (
     <path d="M6 6l12 12M18 6 6 18" />
   </Svg>
 );
+export const IconCheck = (p: P) => (
+  <Svg {...p}>
+    <path d="M5 12.5l4.5 4.5L19 7.5" />
+  </Svg>
+);
 export const IconPlus = (p: P) => (
   <Svg {...p}>
     <path d="M12 5v14M5 12h14" />

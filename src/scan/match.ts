@@ -40,31 +40,158 @@ export function levenshtein(a: string, b: string, max: number): number {
   return prev[b.length];
 }
 
+// Zeichen, die Tesseract auf Karten haeufig verwechselt. Solche Fehler kosten weniger als ein beliebiger Tippfehler,
+// damit der richtige Name klar vor aehnlichen Namen landet.
+const CONFUSION_COST = 0.4;
+const MERGE_COST = 0.5;
+const confusable = new Uint8Array(128 * 128);
+const confuse = ([a, b]: string) => {
+  confusable[a.charCodeAt(0) * 128 + b.charCodeAt(0)] = 1;
+  confusable[b.charCodeAt(0) * 128 + a.charCodeAt(0)] = 1;
+};
+for (const p of ['o0', 'l1', 'i1', 'il', 's5', 'b8', 'z2', 'g6', 'g9', 'ce', 'uv']) {
+  confuse(p); // Namen (normalisiert, klein)
+  confuse(p.toUpperCase()); // Set-Codes (gross)
+}
+for (const p of ['OQ', 'OD', 'QD', 'IT']) confuse(p);
+// Zwei Zeichen, die als eines gelesen werden (oder umgekehrt): "rn" <-> "m" usw. Index = das einzelne Zeichen.
+const mergeFirst = new Uint8Array(128);
+const mergeSecond = new Uint8Array(128);
+for (const [one, [first, second]] of [
+  ['m', 'rn'],
+  ['d', 'cl'],
+  ['w', 'vv'],
+  ['u', 'ii'],
+]) {
+  mergeFirst[one.charCodeAt(0)] = first.charCodeAt(0);
+  mergeSecond[one.charCodeAt(0)] = second.charCodeAt(0);
+}
+
+const substCost = (a: string, b: string) => {
+  if (a === b) return 0;
+  const i = a.charCodeAt(0) * 128 + b.charCodeAt(0);
+  return i < confusable.length && confusable[i] ? CONFUSION_COST : 1;
+};
+
+let rowA = new Float64Array(64);
+let rowB = new Float64Array(64);
+let rowC = new Float64Array(64);
+const NO_MATCH = 1e9;
+
+/**
+ * Editierdistanz (Zeilen = a, Spalten = b), in der typische OCR-Verwechslungen guenstiger sind. Liefert zugleich die
+ * Distanz des Anfangs a[0..prefixRow) zu b, das spart beim Namensabgleich einen zweiten Durchlauf. Bricht ab, sobald
+ * beide Grenzen sicher ueberschritten sind; Werte darueber sind dann NO_MATCH.
+ */
+function ocrDp(a: string, b: string, max: number, prefixRow: number, prefixMax: number): [number, number] {
+  const n = b.length;
+  // Jeder Laengenunterschied kostet mindestens eine Verschmelzung.
+  const fullPossible = Math.abs(a.length - n) * MERGE_COST <= max;
+  const lastRow = fullPossible ? a.length : Math.min(prefixRow, a.length);
+  if (lastRow <= 0) return [fullPossible && n <= max ? n : NO_MATCH, NO_MATCH];
+  if (rowA.length < n + 1) [rowA, rowB, rowC] = [0, 1, 2].map(() => new Float64Array(n + 32));
+  let p2 = rowA;
+  let p1 = rowB;
+  let cur = rowC;
+  for (let j = 0; j <= n; j++) p1[j] = j;
+  let prevMin = 0;
+  let prefix = NO_MATCH;
+  for (let i = 1; i <= lastRow; i++) {
+    const ca = a.charCodeAt(i - 1);
+    const caPrev = i >= 2 ? a.charCodeAt(i - 2) : -1;
+    const conf = ca < 128 ? ca * 128 : -1;
+    const intoA = ca < 128 ? mergeFirst[ca] : 0;
+    cur[0] = i;
+    let rowMin = i;
+    for (let j = 1; j <= n; j++) {
+      const cb = b.charCodeAt(j - 1);
+      let v = p1[j - 1] + (ca === cb ? 0 : conf >= 0 && cb < 128 && confusable[conf + cb] ? CONFUSION_COST : 1);
+      const del = p1[j] + 1;
+      if (del < v) v = del;
+      const ins = cur[j - 1] + 1;
+      if (ins < v) v = ins;
+      // zwei Zeichen in a, eines in b ("rn" gegen "m")
+      if (cb < 128 && mergeFirst[cb] === caPrev && mergeSecond[cb] === ca && p2[j - 1] + MERGE_COST < v) v = p2[j - 1] + MERGE_COST;
+      // ein Zeichen in a, zwei in b
+      if (intoA && j >= 2 && intoA === b.charCodeAt(j - 2) && mergeSecond[ca] === cb && p1[j - 2] + MERGE_COST < v) {
+        v = p1[j - 2] + MERGE_COST;
+      }
+      cur[j] = v;
+      if (v < rowMin) rowMin = v;
+    }
+    if (i === prefixRow) prefix = cur[n];
+    // Die naechste Zeile haengt von den letzten beiden ab.
+    const bound = i < prefixRow ? Math.max(max, prefixMax) : max;
+    if (rowMin > bound && prevMin > bound) return [NO_MATCH, prefix];
+    prevMin = rowMin;
+    [p2, p1, cur] = [p1, cur, p2];
+  }
+  return [fullPossible ? p1[n] : NO_MATCH, prefix];
+}
+
+/**
+ * Editierdistanz, in der typische OCR-Verwechslungen (l/1/I, O/0, rn/m ...) guenstiger sind.
+ * Bricht ab, sobald `max` sicher ueberschritten ist (liefert dann max + 1).
+ */
+export function ocrDistance(a: string, b: string, max: number): number {
+  const d = ocrDp(a, b, max, -1, 0)[0];
+  return d <= max ? d : max + 1;
+}
+
+interface NameScore {
+  score: number;
+  /** Nur Anfang oder Teil der gelesenen Zeile passt (Rest: Symbole, Rauschen oder ein laengerer Name). */
+  partial: boolean;
+}
+
+/** `floor`: Treffer darunter interessieren nicht; je hoeher, desto frueher bricht die Distanzberechnung ab. */
+function scoreKey(q: string, key: string, floor = 0.5): NameScore {
+  const len = Math.max(q.length, key.length);
+  const max = Math.min(0.45, 1 - floor) * len;
+  // Angehaengte Zeichen (z. B. Attributsymbol als "2" gelesen): zusaetzlich nur den Anfang vergleichen.
+  const prefixRow = q.length > key.length && key.length >= 5 ? key.length : -1;
+  const prefixMax = key.length * 0.25;
+  const [d, pd] = ocrDp(q, key, max, prefixRow, prefixMax);
+  let score = d <= max ? 1 - d / len : 0;
+  let partial = false;
+  // OCR liest oft Rahmen- oder Attributsymbole mit; ein vollstaendig enthaltener Name ist trotzdem ein Treffer.
+  if (key.length >= 6 && score < 0.9 && q.includes(key)) [score, partial] = [0.9, true];
+  if (pd <= prefixMax) {
+    const ps = (1 - pd / key.length) * 0.97;
+    if (ps > score) [score, partial] = [ps, true];
+  }
+  return { score, partial };
+}
+
+/** Aehnlichkeit einer OCR-Zeile (normalisiert) mit einem Namensschluessel, 0..1. */
+export const nameScore = (q: string, key: string): number => (q.length < 3 ? 0 : scoreKey(q, key).score);
+
 /** Beste Namenstreffer fuer eine OCR-Zeile. Score 1 = identisch. */
 export function matchNames(ocrText: string, entries: NameEntry[], top = 5): NameHit[] {
   const q = normalizeName(ocrText);
   if (q.length < 3) return [];
-  const best = new Map<number, number>();
+  const best = new Map<number, NameScore & { key: string }>();
+  // Namen weit hinter dem bisher besten spielen fuer die Auswahl keine Rolle mehr: frueher abbrechen.
+  let floor = 0.5;
   for (const e of entries) {
-    const len = Math.max(q.length, e.key.length);
-    const max = Math.floor(len * 0.45);
-    let score = 0;
-    if (Math.abs(q.length - e.key.length) <= max) {
-      const d = levenshtein(q, e.key, max);
-      if (d <= max) score = 1 - d / len;
+    const s = scoreKey(q, e.key, floor);
+    if (s.score <= floor || s.score <= (best.get(e.id)?.score ?? 0)) continue;
+    best.set(e.id, { ...s, key: e.key });
+    floor = Math.max(floor, s.score - 0.3);
+  }
+  // "Dark Magician" erklaert von "Dark Magician Gir1" nur den Anfang. Gibt es einen laengeren Namen, der den Rest
+  // ebenfalls erklaert ("Dark Magician Girl"), gewinnt dieser. Kurzer Rest (Symbol-Rauschen) zaehlt nicht.
+  const all = [...best.values()];
+  for (const a of all) {
+    if (!a.partial) continue;
+    const rest = q.length - a.key.length;
+    for (const b of all) {
+      if (b === a || b.score < 0.8 || b.key.length <= a.key.length || !b.key.includes(a.key)) continue;
+      if (rest >= b.key.length - a.key.length - 1) a.score = Math.min(a.score, b.score - 0.1);
     }
-    // OCR liest oft Rahmen- oder Attributsymbole mit; ein vollstaendig enthaltener Name ist trotzdem ein Treffer.
-    if (e.key.length >= 6 && q.includes(e.key)) score = Math.max(score, 0.9);
-    // Angehaengte Zeichen (z. B. Attributsymbol als "2" gelesen): nur den Anfang vergleichen.
-    if (q.length > e.key.length && e.key.length >= 5) {
-      const pmax = Math.floor(e.key.length * 0.25);
-      const d = levenshtein(q.slice(0, e.key.length), e.key, pmax);
-      if (d <= pmax) score = Math.max(score, (1 - d / e.key.length) * 0.97);
-    }
-    if (score > 0.5 && score > (best.get(e.id) ?? 0)) best.set(e.id, score);
   }
   return [...best.entries()]
-    .map(([id, score]) => ({ id, score }))
+    .map(([id, s]) => ({ id, score: s.score }))
     .sort((a, b) => b.score - a.score)
     .slice(0, top);
 }
@@ -93,4 +220,91 @@ export function extractPasscodes(text: string): number[] {
   const out = new Set<number>();
   for (const m of t.matchAll(/(?<!\d)(\d{8})(?!\d)/g)) out.add(Number(m[1]));
   return [...out];
+}
+
+const LETTER_FOR: Record<string, string> = { '0': 'O', '1': 'I', '5': 'S', '8': 'B', '2': 'Z', '6': 'G' };
+const DIGIT_FOR: Record<string, string> = { O: '0', I: '1', S: '5', B: '8', Z: '2', G: '6' };
+
+/** Set-Kuerzel mischen Buchstaben und Ziffern ("MP19", "RA01"): "L0B-DE005" kann auch "LOB-DE005" sein. */
+export function setCodeVariants(code: string): string[] {
+  const m = /^([A-Z0-9]{2,6})(-.*)$/.exec(code);
+  if (!m) return [code];
+  let prefixes = [''];
+  for (const ch of m[1]) {
+    const alt = LETTER_FOR[ch] ?? DIGIT_FOR[ch];
+    prefixes = prefixes.flatMap((p) => (alt && prefixes.length < 16 ? [p + ch, p + alt] : [p + ch]));
+  }
+  return prefixes.map((p) => p + m[2]);
+}
+
+/** Zeichenweiser Vergleich ab Position `at`; Verwechslungen kosten weniger. */
+function windowCost(want: string, text: string, at: number, limit: number): number {
+  let cost = 0;
+  for (let k = 0; k < want.length && cost <= limit; k++) cost += substCost(want[k], text[at + k]);
+  return cost;
+}
+
+export interface PrintHit {
+  /** Index in der uebergebenen Code-Liste. */
+  index: number;
+  /** Gelesenes Regionskuerzel (DE, EN, G, ...), leer bei Codes ohne Region. */
+  region: string;
+  /** 0 = exakt, < 0.5 = eine typische Verwechslung, bis 1 = ein Zeichen falsch. */
+  dist: number;
+}
+
+/**
+ * Sucht die Drucke einer Kandidatenkarte unscharf im OCR-Text der Code-Bereiche. Anders als extractSetCodes
+ * braucht das kein sauberes Muster: "L0B-DE0O5" oder "LOBDE005" passen trotzdem zu "LOB-EN005".
+ */
+export function printMatch(text: string, codes: string[]): PrintHit | null {
+  const t = text.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  let best: PrintHit | null = null;
+  codes.forEach((code, index) => {
+    const m = /^([A-Z0-9]{2,6})-[A-Z]{0,2}(\d{2,4})$/.exec(code.toUpperCase());
+    if (!m) return;
+    const [, prefix, num] = m;
+    for (let i = 0; i + prefix.length + num.length <= t.length; i++) {
+      const dp = windowCost(prefix, t, i, 1);
+      if (dp > 1) continue;
+      for (let r = 0; r <= 2; r++) {
+        const at = i + prefix.length + r;
+        if (at + num.length > t.length) break;
+        const region = t.slice(i + prefix.length, at);
+        if (!/^[A-Z]*$/.test(region)) break;
+        const dist = dp + windowCost(num, fixDigits(t.slice(at, at + num.length)), 0, 1);
+        if (dist <= 1 && (!best || dist < best.dist)) best = { index, region, dist };
+      }
+    }
+  });
+  return best;
+}
+
+/** Kleinste Abweichung (0, 1 oder 2 = keine Naehe) zwischen den gelesenen Ziffernfolgen und einem Passcode. */
+export function passcodeDistance(text: string, id: number): number {
+  const target = String(id).padStart(8, '0');
+  let best = 2;
+  for (const m of text.toUpperCase().matchAll(/[0-9OQDILSBZG|]+/g)) {
+    if (m[0].length < 7 || m[0].length > 9) continue;
+    best = Math.min(best, levenshtein(fixDigits(m[0]), target, 1));
+  }
+  return best;
+}
+
+export interface Stats {
+  atk?: number;
+  def?: number;
+}
+
+/** "ATK/2500 DEF/2100" (auch ohne Leerzeichen). Den LINK-Wert liest Tesseract in der Kartenschrift unzuverlaessig. */
+export function extractStats(text: string): Stats {
+  const t = text.toUpperCase().replace(/D[E3]F/g, ' DEF ').replace(/L[I1]NK/g, ' LINK ');
+  const pick = (re: RegExp): number | undefined => {
+    let best: string | undefined;
+    // Mehrfach gelesen (Bereiche ueberlappen): die vollstaendigste Zahl gewinnt.
+    for (const m of t.matchAll(re)) if (!best || m[1].length > best.length) best = m[1];
+    const v = best === undefined ? NaN : Number(fixDigits(best));
+    return Number.isInteger(v) ? v : undefined;
+  };
+  return { atk: pick(/A[T7I]K[ \t]*\/?[ \t]*([0-9OQDILSBZG|]{1,4})/g), def: pick(/DEF[ \t]*\/?[ \t]*([0-9OQDILSBZG|]{1,4})/g) };
 }

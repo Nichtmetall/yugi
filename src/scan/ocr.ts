@@ -1,26 +1,30 @@
 import { createWorker, PSM, type Worker } from 'tesseract.js';
+import {
+  backgroundColor,
+  BOTTOM_REGION,
+  CARD_RATIO,
+  clippedShare,
+  frameProbabilities,
+  NAME_REGION,
+  ocrGray,
+  type Region,
+  SETCODE_REGION,
+  sharpness,
+  STATS_REGION,
+  TEXT_REGION,
+} from './image';
 
-// Kartenmasse 59 x 86 mm. Alle Regionen sind Anteile der Kartenbreite/-hoehe.
-export const CARD_RATIO = 59 / 86;
-const CARD_W = 720;
-const CARD_H = Math.round(CARD_W / CARD_RATIO);
-
-interface Region {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
-const NAME_REGION: Region = { x: 0.05, y: 0.035, w: 0.78, h: 0.085 };
-// Set-Code sitzt bei normalen Karten rechts unter dem Artwork ...
-const SETCODE_REGION: Region = { x: 0.45, y: 0.7, w: 0.52, h: 0.075 };
-// ... bei Pendel-Karten unten links; dort steht auch immer der Passcode.
-const BOTTOM_REGION: Region = { x: 0.0, y: 0.92, w: 0.75, h: 0.075 };
+/** Kartenbreite beim Kopieren aus dem Video: mindestens so fein wie bisher, hoechstens so fein, dass es flott bleibt. */
+const CARD_MIN_W = 720;
+const CARD_MAX_W = 1400;
 
 export interface OcrResult {
   name: string;
+  /** Tesseract-Konfidenz der Namenszeile (0..100). */
+  nameConf: number;
   codes: string;
+  /** Wahrscheinlichkeit je Rahmenfarbe (Reihenfolge wie FRAME_GROUPS), aus dem Hintergrund des Namensfelds. */
+  frame: number[];
 }
 
 /** Zwei Worker, damit Name und Codes gleichzeitig gelesen werden und keiner die Parameter umstellen muss. */
@@ -43,17 +47,21 @@ const logger = (m: { status?: string; progress?: number }) => {
   }
 };
 
+// Kartennamen und Codes sind keine Woerterbuchwoerter; das Woerterbuch "korrigiert" sie sonst falsch.
+const NO_DICTIONARY = { load_system_dawg: '0', load_freq_dawg: '0' };
+
 async function createNameWorker() {
-  const w = await createWorker(['eng', 'deu'], 1, { logger });
-  await w.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE });
+  const w = await createWorker(['eng', 'deu'], 1, { logger }, NO_DICTIONARY);
+  await w.setParameters({ tessedit_pageseg_mode: PSM.SINGLE_LINE, user_defined_dpi: '300' });
   return w;
 }
 
 async function createCodeWorker() {
-  const w = await createWorker('eng', 1, { logger });
+  const w = await createWorker('eng', 1, { logger }, NO_DICTIONARY);
   await w.setParameters({
     tessedit_pageseg_mode: PSM.SPARSE_TEXT,
-    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
+    tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/',
+    user_defined_dpi: '300',
   });
   return w;
 }
@@ -81,14 +89,15 @@ function sourceRect(video: HTMLVideoElement, frame: Rect, view: { w: number; h: 
   return { x: (frame.x - ox) / scale, y: (frame.y - oy) / scale, w: frame.w / scale, h: frame.h / scale };
 }
 
-/** Kopiert den Kartenausschnitt aus dem Video in ein Canvas fester Groesse. */
+/** Kopiert den Kartenausschnitt in Kameraaufloesung aus dem Video (nicht erst verkleinern und spaeter wieder vergroessern). */
 export function grabCard(video: HTMLVideoElement, frame: Rect, view: { w: number; h: number }): HTMLCanvasElement {
   const s = sourceRect(video, frame, view);
   const canvas = document.createElement('canvas');
-  canvas.width = CARD_W;
-  canvas.height = CARD_H;
+  canvas.width = Math.round(Math.min(CARD_MAX_W, Math.max(CARD_MIN_W, s.w)));
+  canvas.height = Math.round(canvas.width / CARD_RATIO);
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-  ctx.drawImage(video, s.x, s.y, s.w, s.h, 0, 0, CARD_W, CARD_H);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(video, s.x, s.y, s.w, s.h, 0, 0, canvas.width, canvas.height);
   return canvas;
 }
 
@@ -116,44 +125,57 @@ export function signatureDiff(a: Uint8Array, b: Uint8Array): number {
   return sum / a.length;
 }
 
-/** Ausschnitt vergroessern, in Graustufen wandeln und so drehen, dass dunkle Schrift auf hellem Grund steht. */
-function prepare(card: HTMLCanvasElement, r: Region, upscale: number): HTMLCanvasElement {
-  const sw = r.w * card.width;
-  const sh = r.h * card.height;
-  const out = document.createElement('canvas');
-  out.width = Math.round(sw * upscale);
-  out.height = Math.round(sh * upscale);
-  const ctx = out.getContext('2d', { willReadFrequently: true })!;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(card, r.x * card.width, r.y * card.height, sw, sh, 0, 0, out.width, out.height);
-
-  const img = ctx.getImageData(0, 0, out.width, out.height);
-  const px = img.data;
-  const gray = new Uint8ClampedArray(px.length / 4);
-  let min = 255;
-  let max = 0;
-  let sum = 0;
-  for (let i = 0, j = 0; i < px.length; i += 4, j++) {
-    const g = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
-    gray[j] = g;
-    if (g < min) min = g;
-    if (g > max) max = g;
-    sum += g;
-  }
-  const mean = sum / gray.length;
-  const range = Math.max(1, max - min);
-  // Ueberwiegend dunkler Hintergrund (Xyz, Zauber, Fallen) -> invertieren.
-  const invert = mean < min + range / 2;
-  for (let i = 0, j = 0; i < px.length; i += 4, j++) {
-    let v = ((gray[j] - min) / range) * 255;
-    if (invert) v = 255 - v;
-    px[i] = px[i + 1] = px[i + 2] = v;
-  }
-  ctx.putImageData(img, 0, 0);
-  return out;
+function regionData(card: HTMLCanvasElement, r: Region): ImageData {
+  const ctx = card.getContext('2d', { willReadFrequently: true })!;
+  return ctx.getImageData(
+    Math.round(r.x * card.width),
+    Math.round(r.y * card.height),
+    Math.max(1, Math.round(r.w * card.width)),
+    Math.max(1, Math.round(r.h * card.height)),
+  );
 }
 
-/** Set-Code-Zeile und Fusszeile untereinander auf weissen Grund: ein Erkennungslauf statt zwei. */
+export interface CardQuality {
+  /** Kantenschaerfe der Namenszeile; nur innerhalb derselben Szene vergleichbar. */
+  sharpness: number;
+  /** Anteil ausgebrannter Pixel in Textfeld und Set-Code-Bereich (0..1). */
+  glare: number;
+}
+
+export function inspectCard(card: HTMLCanvasElement): CardQuality {
+  return {
+    sharpness: sharpness(regionData(card, NAME_REGION)),
+    glare: Math.max(clippedShare(regionData(card, TEXT_REGION)), clippedShare(regionData(card, SETCODE_REGION))),
+  };
+}
+
+/** Ausschnitt so skalieren, dass er etwa `height` Pixel hoch ist; die Schrift liegt dann bei 30 bis 60 px. */
+function crop(card: HTMLCanvasElement, r: Region, height: number) {
+  const sw = r.w * card.width;
+  const sh = r.h * card.height;
+  const scale = Math.min(4, Math.max(1, height / sh));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(sw * scale);
+  canvas.height = Math.round(sh * scale);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(card, r.x * card.width, r.y * card.height, sw, sh, 0, 0, canvas.width, canvas.height);
+  return { canvas, ctx, img: ctx.getImageData(0, 0, canvas.width, canvas.height) };
+}
+
+/** Ausschnitt fuer Tesseract aufbereiten: kontraststaerkster Kanal, gestreckt, dunkle Schrift auf hellem Grund. */
+function forOcr({ canvas, ctx, img }: ReturnType<typeof crop>): HTMLCanvasElement {
+  const gray = ocrGray(img);
+  const out = ctx.createImageData(img.width, img.height);
+  for (let i = 0, j = 0; j < gray.length; i += 4, j++) {
+    out.data[i] = out.data[i + 1] = out.data[i + 2] = gray[j];
+    out.data[i + 3] = 255;
+  }
+  ctx.putImageData(out, 0, 0);
+  return canvas;
+}
+
+/** Set-Code-Zeile, ATK/DEF und Fusszeile untereinander auf weissen Grund: ein Erkennungslauf statt drei. */
 function stack(parts: HTMLCanvasElement[], gap = 24): HTMLCanvasElement {
   const out = document.createElement('canvas');
   out.width = Math.max(...parts.map((p) => p.width)) + gap * 2;
@@ -171,9 +193,13 @@ function stack(parts: HTMLCanvasElement[], gap = 24): HTMLCanvasElement {
 
 export async function readCard(card: HTMLCanvasElement): Promise<OcrResult> {
   const workers = await getOcrWorker();
-  const [name, codes] = await Promise.all([
-    workers.name.recognize(prepare(card, NAME_REGION, 2)),
-    workers.codes.recognize(stack([prepare(card, SETCODE_REGION, 2.5), prepare(card, BOTTOM_REGION, 2.5)])),
+  const name = crop(card, NAME_REGION, 120);
+  const frame = frameProbabilities(backgroundColor(name.img));
+  const codes = stack([
+    forOcr(crop(card, SETCODE_REGION, 160)),
+    forOcr(crop(card, STATS_REGION, 110)),
+    forOcr(crop(card, BOTTOM_REGION, 160)),
   ]);
-  return { name: name.data.text.trim(), codes: codes.data.text };
+  const [n, c] = await Promise.all([workers.name.recognize(forOcr(name)), workers.codes.recognize(codes)]);
+  return { name: n.data.text.trim(), nameConf: n.data.confidence, codes: c.data.text, frame };
 }

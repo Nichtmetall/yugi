@@ -3,10 +3,15 @@ import assert from 'node:assert/strict';
 import {
   extractPasscodes,
   extractSetCodes,
+  extractStats,
   levenshtein,
   matchNames,
   normalizeName,
+  ocrDistance,
+  passcodeDistance,
+  printMatch,
   setCodeKey,
+  setCodeVariants,
 } from '../src/scan/match.ts';
 import { parseYdk, toYdk } from '../src/lib/ydk.ts';
 
@@ -64,6 +69,61 @@ test('extractPasscodes findet 8-stellige Zahlen', () => {
   assert.deepEqual(extractPasscodes('46986414 1996 KAZUKI'), [46986414]);
   assert.deepEqual(extractPasscodes('4698641O'), [46986410]);
   assert.deepEqual(extractPasscodes('123456789'), []);
+});
+
+test('ocrDistance: typische OCR-Verwechslungen kosten weniger', () => {
+  assert.equal(ocrDistance('biue', 'blue', 3), 0.4);
+  assert.equal(ocrDistance('retumer', 'returner', 3), 0.5);
+  assert.equal(ocrDistance('kitten', 'sitting', 5), 3);
+  assert.equal(ocrDistance('abc', 'abcdefghij', 3), 4);
+});
+
+test('matchNames: kuerzerer Name verdraengt keinen laengeren, der die ganze Zeile erklaert', () => {
+  const list = [
+    ...entries,
+    { key: normalizeName('Jinzo'), id: 77585513 },
+    { key: normalizeName('Jinzo - Returner'), id: 3 },
+  ];
+  // Frueher gewann hier "Dark Magician" mit 0,97 (nur der Anfang verglichen) und wurde automatisch hinzugefuegt.
+  assert.equal(matchNames('Dark Magician Gir1', list)[0].id, 38033121);
+  assert.equal(matchNames('Dark Magician Girl 2', list)[0].id, 38033121);
+  assert.equal(matchNames('Jinzo - Retumer', list)[0].id, 3);
+  // Kurzes Symbol-Rauschen hinter dem Namen bleibt Rauschen.
+  assert.equal(matchNames('DARK MAGICIAN 6', list)[0].id, 46986414);
+  assert.equal(matchNames('JINZO', list)[0].id, 77585513);
+});
+
+test('setCodeVariants tauscht Buchstaben und Ziffern im Set-Kuerzel', () => {
+  const v = setCodeVariants('L0B-DE005');
+  assert.equal(v[0], 'L0B-DE005');
+  assert.ok(v.includes('LOB-DE005'));
+  assert.deepEqual(setCodeVariants('kaputt'), ['kaputt']);
+});
+
+test('printMatch findet Drucke auch in verlesenem Text', () => {
+  assert.deepEqual(printMatch('L0B-DE0O5', ['SDY-005', 'LOB-EN005']), { index: 1, region: 'DE', dist: 0.4 });
+  assert.equal(printMatch('xx LOBDE005 yy', ['LOB-EN005'])?.dist, 0);
+  assert.equal(printMatch('LOB-DE006', ['LOB-EN005'])?.dist, 1);
+  assert.equal(printMatch('MRD-DE060 1996', ['LOB-EN005']), null);
+});
+
+test('passcodeDistance vergleicht unscharf mit einem bekannten Passcode', () => {
+  assert.equal(passcodeDistance('469864I4 1996', 46986414), 0);
+  assert.equal(passcodeDistance('46986415', 46986414), 1);
+  assert.equal(passcodeDistance('04031928', 4031928), 0);
+  assert.equal(passcodeDistance('1996 KAZUKI TAKAHASHI', 46986414), 2);
+});
+
+test('extractStats liest ATK/DEF auch ohne Leerzeichen und mit Ziffernfehlern', () => {
+  // echte Tesseract-Ausgaben aus dem Test mit Kartenbildern
+  assert.deepEqual(extractStats('ATK/3000DEF/2800'), { atk: 3000, def: 2800 });
+  assert.deepEqual(extractStats('ATK/2000DEF/1700 4'), { atk: 2000, def: 1700 });
+  assert.deepEqual(extractStats('BS\n\nATK/ 0 DEF/ 0'), { atk: 0, def: 0 });
+  assert.deepEqual(extractStats('ATK/2300LINK-2'), { atk: 2300, def: undefined });
+  assert.deepEqual(extractStats('ATK/25OO DEF/21O0'), { atk: 2500, def: 2100 });
+  // Abgeschnittene Zweitlesung aus dem ueberlappenden Fussbereich verdraengt die vollstaendige nicht.
+  assert.deepEqual(extractStats('ATK/2500 DEF/2100\nATK/25'), { atk: 2500, def: 2100 });
+  assert.deepEqual(extractStats('LOB-EN005'), { atk: undefined, def: undefined });
 });
 
 test('YDK hin und zurueck', () => {

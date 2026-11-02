@@ -903,6 +903,7 @@ select:focus {
   min-height: 0;
   background: #000;
   container-type: size;
+  overflow: hidden;
 }
 
 .viewfinder video {
@@ -934,7 +935,7 @@ select:focus {
   position: absolute;
   left: 50%;
   top: 50%;
-  height: min(calc(100cqh - 120px), calc((100cqw - 40px) * 86 / 59));
+  height: min(calc(100cqh - 112px), calc((100cqw - 40px) * 86 / 59));
   aspect-ratio: 59 / 86;
   transform: translate(-50%, -50%);
   border-radius: 10px;
@@ -961,6 +962,70 @@ select:focus {
   to {
     outline-offset: 0;
     outline-color: var(--ok);
+  }
+}
+
+/* Haken in der Rahmenmitte, sobald eine Karte hinzugefuegt wurde: springt auf, zeichnet sich, blendet aus. */
+.scan-check {
+  --size: 88px;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: var(--size);
+  height: var(--size);
+  margin: calc(var(--size) / -2) 0 0 calc(var(--size) / -2);
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow:
+    0 0 0 6px rgba(127, 211, 165, 0.28),
+    0 10px 28px rgba(6, 8, 20, 0.5);
+  animation: check-pop 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.scan-check svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.scan-check path {
+  fill: none;
+  stroke: var(--ink-deep);
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 1;
+  animation: check-draw 0.3s 0.12s cubic-bezier(0.65, 0, 0.35, 1) both;
+}
+
+@keyframes check-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  24% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+  38% {
+    transform: scale(1);
+  }
+  76% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+}
+
+@keyframes check-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
   }
 }
 
@@ -1138,19 +1203,22 @@ select:focus {
   white-space: nowrap;
 }
 
-.dock-meta > span:last-child {
+.dock-meta > span:not([class]) {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .dock-meta select {
+  flex: none;
   min-height: 30px;
-  min-width: 0;
   padding: 2px 6px 2px 8px;
   font-size: 0.85rem;
 }
 
 .dock-ok {
+  display: inline-flex;
+  flex: none;
   color: var(--ok);
   font-weight: 600;
 }
@@ -1163,8 +1231,11 @@ select:focus {
 .dock-actions {
   display: flex;
   gap: 8px;
+  padding-right: 24px;
   overflow-x: auto;
   scrollbar-width: none;
+  /* Weitere Treffer laufen nach rechts aus, statt hart abgeschnitten zu werden. */
+  mask-image: linear-gradient(to left, transparent, #000 24px);
 }
 
 .dock-actions .btn {

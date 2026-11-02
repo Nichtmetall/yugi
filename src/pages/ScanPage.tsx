@@ -2,17 +2,16 @@ import { useEffect, useRef, useState } from 'react';
 import { imageUrl } from '../api/ygoprodeck';
 import { useStore } from '../lib/store';
 import { cardName } from '../lib/format';
-import { normalizeName } from '../scan/match';
-import { frameSignature, getOcrWorker, grabCard, onOcrStatus, readCard, signatureDiff } from '../scan/ocr';
-import { rankCandidates, SURE_SCORE, type Candidate } from '../scan/recognize';
+import { frameSignature, getOcrWorker, grabCard, inspectCard, onOcrStatus, readCard, signatureDiff } from '../scan/ocr';
+import { observe, rankCandidates, verdict, type Candidate, type Observation } from '../scan/recognize';
 import { addToCollection, changeQty } from '../state/collection';
 import { addCardToDeck, decksStore, defaultSection, removeCardFromDeck, SECTION_LABEL } from '../state/decks';
 import { settingsStore } from '../state/settings';
 import { detailStore, openCard } from '../state/ui';
-import { IconMinus, IconPlus, IconTorch } from '../components/Icons';
+import { IconCheck, IconMinus, IconPlus, IconTorch } from '../components/Icons';
 
 /** Eine erfasste Karte dieser Sitzung (ein Druck, ggf. mehrere Exemplare). */
-export interface Entry {
+interface Entry {
   id: number;
   cand: Candidate;
   /** Weitere Treffer desselben Scans, falls der Auto-Treffer falsch war. */
@@ -25,8 +24,8 @@ export interface Entry {
 
 type Dock =
   | { kind: 'idle' }
-  | { kind: 'unknown'; read: string }
-  | { kind: 'pick'; candidates: Candidate[] }
+  | { kind: 'unknown'; read: string; glare: boolean }
+  | { kind: 'pick'; candidates: Candidate[]; sure: boolean }
   | { kind: 'added'; id: number };
 
 const TICK_MS = 150;
@@ -38,6 +37,12 @@ const SAME_SCENE = 12;
 const MAX_WAIT_MS = 1500;
 /** Unsichere Treffer so oft neu lesen, solange sich nichts aendert. */
 const MAX_TRIES = 4;
+/** Ein Bild, das unschaerfer ist als dieser Anteil des schaerfsten der Szene, wird uebersprungen (Fokus pumpt noch). */
+const SHARP_KEEP = 0.7;
+/** Ab diesem Anteil ausgebrannter Pixel in Textfeld oder Set-Code-Bereich gilt das Bild als spiegelnd. */
+const GLARE = 0.04;
+/** Dauer der Haken-Animation nach dem Hinzufuegen. */
+const CHECK_MS = 900;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const rarities = (c: Candidate) => [...new Set(c.prints.map((p) => p.rarity))];
@@ -74,6 +79,9 @@ export function ScanPage() {
   const [ocrStatus, setOcrStatus] = useState('Texterkennung wird geladen …');
   const [ocrReady, setOcrReady] = useState(false);
   const [reading, setReading] = useState(false);
+  const [locked, setLocked] = useState(false);
+  /** Zaehler fuer die Haken-Animation; jeder neue Wert spielt sie erneut ab, 0 = aus. */
+  const [check, setCheck] = useState(0);
   const [target, setTarget] = useState('collection');
   const [dock, setDockState] = useState<Dock>({ kind: 'idle' });
   const [entries, setEntriesState] = useState<Entry[]>([]);
@@ -113,7 +121,8 @@ export function ScanPage() {
       try {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: false,
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          // Mehr Pixel fuer die kleine Set-Code- und Passcode-Schrift; Geraete ohne 1440p liefern das Naechstkleinere.
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 2560 }, height: { ideal: 1440 } },
         });
         if (cancelled) return stream.getTracks().forEach((t) => t.stop());
         const video = videoRef.current!;
@@ -121,8 +130,11 @@ export function ScanPage() {
         await video.play();
         const track = stream.getVideoTracks()[0];
         trackRef.current = track;
-        const caps = (track.getCapabilities?.() ?? {}) as MediaTrackCapabilities & { torch?: boolean };
+        const caps = (track.getCapabilities?.() ?? {}) as MediaTrackCapabilities & { torch?: boolean; focusMode?: string[] };
         if (caps.torch) setTorch(false);
+        if (caps.focusMode?.includes('continuous')) {
+          track.applyConstraints({ advanced: [{ focusMode: 'continuous' } as MediaTrackConstraintSet] }).catch(() => {});
+        }
         setLive(true);
       } catch (err) {
         const name = err instanceof DOMException ? err.name : '';
@@ -151,17 +163,32 @@ export function ScanPage() {
     return () => onOcrStatus(null);
   }, []);
 
+  // Haken nach dem Abspielen wieder entfernen (auch bei reduzierter Bewegung, dort ohne Animation).
+  useEffect(() => {
+    if (!check) return;
+    const t = setTimeout(() => setCheck(0), CHECK_MS);
+    return () => clearTimeout(t);
+  }, [check]);
+
+  const confirmAdded = () => {
+    setCheck((n) => n + 1);
+    navigator.vibrate?.(40);
+  };
+
   const add = (cand: Candidate, others: Candidate[]) => {
     const fresh: Entry = { id: ++entrySeq, cand, others, target: targetRef.current, rarity: cand.prints[0]?.rarity, qty: 0 };
     const e = addCopies(fresh, 1);
     setEntries([e, ...entriesRef.current].slice(0, 60));
     setDock({ kind: 'added', id: e.id });
-    navigator.vibrate?.(40);
+    setLocked(true);
+    confirmAdded();
   };
 
   const more = (id: number) => {
     const e = findEntry(id);
-    if (e) replaceEntry(addCopies(e, 1));
+    if (!e) return;
+    replaceEntry(addCopies(e, 1));
+    confirmAdded();
   };
 
   const less = (id: number) => {
@@ -180,7 +207,7 @@ export function ScanPage() {
     if (!e) return;
     removeCopies(e, e.qty);
     setEntries(entriesRef.current.filter((x) => x.id !== id));
-    setDock(e.others.length ? { kind: 'pick', candidates: e.others } : { kind: 'idle' });
+    setDock(e.others.length ? { kind: 'pick', candidates: e.others, sure: false } : { kind: 'idle' });
   };
 
   const changeRarity = (id: number, rarity: string) => {
@@ -199,6 +226,9 @@ export function ScanPage() {
     let settled = false;
     let tries = 0;
     let waitingSince = performance.now();
+    /** Lesungen der aktuellen Szene; sie werden gemeinsam ausgewertet. */
+    let obs: Observation[] = [];
+    let bestSharp = 0;
     lastAutoId.current = null;
 
     const geometry = () => {
@@ -211,18 +241,20 @@ export function ScanPage() {
       };
     };
 
-    const read = async (sig: Uint8Array) => {
-      const video = videoRef.current;
-      const g = geometry();
-      if (!video || !g) return;
+    const read = async (sig: Uint8Array, card: HTMLCanvasElement, glare: boolean) => {
       setReading(true);
+      setLocked(false);
+      // Bei einer Bestaetigungslesung bleibt der Rahmen im Lesezustand, statt kurz zu flackern.
+      let again = false;
       try {
-        const ocr = await readCard(grabCard(video, g.frame, g.view));
+        const ocr = await readCard(card);
         if (stop) return;
         lastSig = sig;
-        const ranked = rankCandidates(ocr);
+        const o = observe(ocr);
+        obs = [...obs, o].slice(-MAX_TRIES);
+        const ranked = rankCandidates(obs);
         const best = ranked[0];
-        const empty = !best && normalizeName(ocr.name).length < 4;
+        const empty = !best && o.q.length < 4;
 
         if (!best) {
           lastAutoId.current = null; // Rahmen leer: dieselbe Karte darf danach erneut erfasst werden
@@ -231,13 +263,14 @@ export function ScanPage() {
             if (dockRef.current.kind !== 'added') setDock({ kind: 'idle' });
           } else {
             settled = ++tries >= MAX_TRIES;
-            setDock({ kind: 'unknown', read: [ocr.name, ocr.codes.replace(/\s+/g, ' ').trim()].filter(Boolean).join(' | ') });
+            setDock({ kind: 'unknown', read: [ocr.name, ocr.codes.replace(/\s+/g, ' ').trim()].filter(Boolean).join(' | '), glare });
           }
           return;
         }
 
-        const sure = best.score >= SURE_SCORE;
-        if (sure && settingsStore.get().autoAdd) {
+        const v = verdict(ranked);
+        const auto = settingsStore.get().autoAdd;
+        if (v === 'sure' && auto) {
           settled = true;
           if (best.card.id !== lastAutoId.current) {
             lastAutoId.current = best.card.id;
@@ -246,15 +279,24 @@ export function ScanPage() {
           return;
         }
 
-        settled = sure || ++tries >= MAX_TRIES;
+        tries++;
+        // Nur ueber den Namen belegt: erst eine weitere Lesung derselben Karte abwarten, dann automatisch uebernehmen.
+        if (v === 'confirm' && auto && tries < MAX_TRIES) {
+          again = true;
+          return;
+        }
+        const sure = v !== 'unsure';
+        settled = (sure && !auto) || tries >= MAX_TRIES;
         const shown = dockRef.current;
         // Liegt der gleiche beste Treffer schon im Dock, Liste nicht unter dem Finger austauschen.
-        if (shown.kind !== 'pick' || shown.candidates[0]?.card.id !== best.card.id) setDock({ kind: 'pick', candidates: ranked });
+        if (shown.kind !== 'pick' || shown.candidates[0]?.card.id !== best.card.id || shown.sure !== sure) {
+          setDock({ kind: 'pick', candidates: ranked, sure });
+        }
       } catch (err) {
         settled = true;
-        setDock({ kind: 'unknown', read: `Fehler bei der Texterkennung: ${String(err)}` });
+        setDock({ kind: 'unknown', read: `Fehler bei der Texterkennung: ${String(err)}`, glare: false });
       } finally {
-        setReading(false);
+        if (!again) setReading(false);
       }
     };
 
@@ -273,17 +315,29 @@ export function ScanPage() {
         if (!lastSig || signatureDiff(sig, lastSig) >= SAME_SCENE) {
           settled = false;
           tries = 0;
+          obs = [];
+          bestSharp = 0;
         }
         if (settled && !force) {
           waitingSince = performance.now();
           continue;
         }
         // Auf ein ruhiges Bild warten, aber nicht ewig.
-        if (!steady && !force && performance.now() - waitingSince < MAX_WAIT_MS) continue;
+        const patient = !force && performance.now() - waitingSince < MAX_WAIT_MS;
+        if (!steady && patient) continue;
+
+        const card = grabCard(video, g.frame, g.view);
+        const quality = inspectCard(card);
+        // Ruhig, aber deutlich unschaerfer als schon gesehen (Fokus sucht noch): auf ein besseres Bild warten.
+        if (patient && quality.sharpness < bestSharp * SHARP_KEEP) continue;
+        bestSharp = Math.max(bestSharp, quality.sharpness);
 
         forceRef.current = false;
-        if (force) tries = 0;
-        await read(sig);
+        if (force) {
+          tries = 0;
+          obs = [];
+        }
+        await read(sig, card, quality.glare >= GLARE);
         waitingSince = performance.now();
       }
     })();
@@ -306,7 +360,6 @@ export function ScanPage() {
   const targetName = target === 'collection' ? 'die Sammlung' : `Deck „${decks.find((d) => d.id === target)?.name ?? ''}“`;
   const shownEntry = dock.kind === 'added' ? entries.find((e) => e.id === dock.id) : undefined;
   const total = entries.reduce((n, e) => n + e.qty, 0);
-  const locked = dock.kind === 'added' && !reading;
 
   return (
     <>
@@ -323,7 +376,16 @@ export function ScanPage() {
           <div className={`scan-frame${reading ? ' reading' : ''}${locked ? ' locked' : ''}`} ref={frameRef}>
             <span className="frame-name" />
             <span className="frame-code" />
+            {check > 0 && (
+              <span className="scan-check" key={check} aria-hidden="true">
+                <svg viewBox="0 0 52 52">
+                  <path d="M15 27l7.5 7.5L37 19" pathLength={1} />
+                </svg>
+              </span>
+            )}
           </div>
+
+          {!live && <div className="viewfinder-msg">{camError || 'Kamera wird gestartet …'}</div>}
 
           <div className="scan-top">
             <label className="scan-target">
@@ -344,7 +406,6 @@ export function ScanPage() {
             )}
           </div>
 
-          {!live && <div className="viewfinder-msg">{camError || 'Kamera wird gestartet …'}</div>}
         </div>
 
         <div className="scan-dock" aria-live="polite">
@@ -355,11 +416,15 @@ export function ScanPage() {
           ) : dock.kind === 'added' && shownEntry ? (
             <AddedCard key={shownEntry.id} entry={shownEntry} onMore={more} onUndo={undo} onRarity={changeRarity} />
           ) : dock.kind === 'pick' ? (
-            <PickCard key={dock.candidates[0].card.id} candidates={dock.candidates} onAdd={add} />
+            <PickCard key={dock.candidates[0].card.id} candidates={dock.candidates} sure={dock.sure} onAdd={add} />
           ) : dock.kind === 'unknown' ? (
             <div className="dock-msg dock-in" key="unknown">
               <strong>Nicht erkannt</strong>
-              <span>Karte flach und ohne Spiegelung in den Rahmen legen, oder ins Bild tippen, um neu zu lesen.</span>
+              <span>
+                {dock.glare
+                  ? 'Die Karte spiegelt. Kippe sie leicht oder ändere das Licht, dann ins Bild tippen, um neu zu lesen.'
+                  : 'Karte flach und ohne Spiegelung in den Rahmen legen, oder ins Bild tippen, um neu zu lesen.'}
+              </span>
               {dock.read && <small className="dock-read">Gelesen: {dock.read}</small>}
             </div>
           ) : (
@@ -417,7 +482,7 @@ function Thumb({ cand, rarity }: { cand: Candidate; rarity?: string }) {
   );
 }
 
-export function AddedCard({
+function AddedCard({
   entry,
   onMore,
   onUndo,
@@ -439,7 +504,10 @@ export function AddedCard({
           {entry.qty > 1 && <span className="dock-qty num"> ×{entry.qty}</span>}
         </p>
         <p className="dock-meta">
-          <span className="dock-ok">Hinzugefügt</span>
+          <span className="dock-ok" title="Hinzugefügt">
+            <IconCheck size={18} />
+            <span className="sr-only">Hinzugefügt</span>
+          </span>
           {opts.length > 1 ? (
             <>
               {entry.cand.setCode && <span>{entry.cand.setCode}</span>}
@@ -466,9 +534,16 @@ export function AddedCard({
   );
 }
 
-export function PickCard({ candidates, onAdd }: { candidates: Candidate[]; onAdd: (c: Candidate, others: Candidate[]) => void }) {
+function PickCard({
+  candidates,
+  sure,
+  onAdd,
+}: {
+  candidates: Candidate[];
+  sure: boolean;
+  onAdd: (c: Candidate, others: Candidate[]) => void;
+}) {
   const [best, ...others] = candidates;
-  const sure = best.score >= SURE_SCORE;
   return (
     <div className="dock-card dock-in">
       <Thumb cand={best} />
