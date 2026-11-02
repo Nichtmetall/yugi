@@ -82,24 +82,22 @@ export function getOcrWorker(): Promise<OcrWorkers> {
 type Rect = { x: number; y: number; w: number; h: number };
 
 /** Rahmenkoordinaten (CSS-Pixel im Sucher) in Videopixel umrechnen; das Video ist per object-fit: cover skaliert. */
-function sourceRect(video: HTMLVideoElement, frame: Rect, view: { w: number; h: number }): Rect {
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
+function sourceRect(vw: number, vh: number, frame: Rect, view: { w: number; h: number }): Rect {
   const scale = Math.max(view.w / vw, view.h / vh);
   const ox = (view.w - vw * scale) / 2;
   const oy = (view.h - vh * scale) / 2;
   return { x: (frame.x - ox) / scale, y: (frame.y - oy) / scale, w: frame.w / scale, h: frame.h / scale };
 }
 
-/** Kopiert den Kartenausschnitt in Kameraaufloesung aus dem Video (nicht erst verkleinern und spaeter wieder vergroessern). */
-export function grabCard(video: HTMLVideoElement, frame: Rect, view: { w: number; h: number }): HTMLCanvasElement {
-  const s = sourceRect(video, frame, view);
+/** Kopiert den Kartenausschnitt in Kameraaufloesung aus dem Kamerabild (nicht erst verkleinern und spaeter wieder vergroessern). */
+export function grabCard(snap: Snapshot, frame: Rect, view: { w: number; h: number }): HTMLCanvasElement {
+  const s = sourceRect(snap.frame.width, snap.frame.height, frame, view);
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(Math.min(CARD_MAX_W, Math.max(CARD_MIN_W, s.w)));
   canvas.height = Math.round(canvas.width / CARD_RATIO);
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(video, s.x, s.y, s.w, s.h, 0, 0, canvas.width, canvas.height);
+  ctx.drawImage(snap.frame, s.x, s.y, s.w, s.h, 0, 0, canvas.width, canvas.height);
   return canvas;
 }
 
@@ -113,7 +111,14 @@ export interface Snapshot {
   src: Rect;
   /** CSS-Pixel im Sucher je Schnappschuss-Pixel. */
   scale: number;
+  /**
+   * Das Kamerabild in voller Aufloesung, aus dem auch gelesen wird: Die Suche laeuft im Hintergrund, und bewegt sich
+   * die Kamera inzwischen, passt die gefundene Karte nicht mehr zum laufenden Video. Gilt bis zum naechsten Schnappschuss.
+   */
+  frame: HTMLCanvasElement;
 }
+
+let frameCanvas: HTMLCanvasElement | null = null;
 
 const snapCanvases: HTMLCanvasElement[] = [];
 function snapCanvas(level: number, width: number, height: number) {
@@ -124,12 +129,17 @@ function snapCanvas(level: number, width: number, height: number) {
 
 /** Das sichtbare Sucherbild, verkleinert fuer die Kartensuche. */
 export function snapshot(video: HTMLVideoElement, view: { w: number; h: number }): Snapshot {
-  const src = sourceRect(video, { x: 0, y: 0, w: view.w, h: view.h }, view);
+  const frame = (frameCanvas ??= document.createElement('canvas'));
+  if (frame.width !== video.videoWidth || frame.height !== video.videoHeight) {
+    Object.assign(frame, { width: video.videoWidth, height: video.videoHeight });
+  }
+  frame.getContext('2d')!.drawImage(video, 0, 0);
+  const src = sourceRect(frame.width, frame.height, { x: 0, y: 0, w: view.w, h: view.h }, view);
   const width = SNAP_W;
   const height = Math.round((SNAP_W * view.h) / view.w);
   // Stufenweise halbieren: Manche Browser glaetten beim Verkleinern in einem Schritt kaum, dann zerfallen Kanten in
   // Treppen und Rauschen.
-  let from: CanvasImageSource = video;
+  let from: CanvasImageSource = frame;
   let r = { ...src };
   let level = 0;
   while (r.w > width * 2) {
@@ -142,7 +152,7 @@ export function snapshot(video: HTMLVideoElement, view: { w: number; h: number }
   const ctx = out.getContext('2d', { willReadFrequently: true })!;
   ctx.imageSmoothingQuality = 'medium';
   ctx.drawImage(from, r.x, r.y, r.w, r.h, 0, 0, width, height);
-  return { px: ctx.getImageData(0, 0, width, height), src, scale: view.w / width };
+  return { px: ctx.getImageData(0, 0, width, height), src, scale: view.w / width, frame };
 }
 
 let detector: Worker | null | undefined;
@@ -177,10 +187,10 @@ export function findCard(px: ImageData, prev: Quad | null): Promise<Quad | null>
 }
 
 /**
- * Kopiert die erkannte Karte entzerrt aus dem Video: aufrecht, im Kartenformat und in Kameraaufloesung (nicht aus dem
- * kleinen Schnappschuss). `quad` in Schnappschuss-Pixeln.
+ * Kopiert die erkannte Karte entzerrt aus dem Kamerabild des Schnappschusses: aufrecht, im Kartenformat und in
+ * Kameraaufloesung (nicht aus dem kleinen Schnappschuss). `quad` in Schnappschuss-Pixeln.
  */
-export function grabQuad(video: HTMLVideoElement, snap: Snapshot, quad: Quad): HTMLCanvasElement {
+export function grabQuad(snap: Snapshot, quad: Quad): HTMLCanvasElement {
   const k = snap.src.w / snap.px.width;
   const q = quad.map((p) => ({ x: snap.src.x + p.x * k, y: snap.src.y + p.y * k })) as Quad;
   const cardW = (Math.hypot(q[1].x - q[0].x, q[1].y - q[0].y) + Math.hypot(q[2].x - q[3].x, q[2].y - q[3].y)) / 2;
@@ -190,14 +200,14 @@ export function grabQuad(video: HTMLVideoElement, snap: Snapshot, quad: Quad): H
   const scale = Math.min(1, width / cardW);
   const x0 = Math.max(0, Math.floor(Math.min(...q.map((p) => p.x))));
   const y0 = Math.max(0, Math.floor(Math.min(...q.map((p) => p.y))));
-  const x1 = Math.min(video.videoWidth, Math.ceil(Math.max(...q.map((p) => p.x))));
-  const y1 = Math.min(video.videoHeight, Math.ceil(Math.max(...q.map((p) => p.y))));
+  const x1 = Math.min(snap.frame.width, Math.ceil(Math.max(...q.map((p) => p.x))));
+  const y1 = Math.min(snap.frame.height, Math.ceil(Math.max(...q.map((p) => p.y))));
   const area = document.createElement('canvas');
   area.width = Math.max(2, Math.round((x1 - x0) * scale));
   area.height = Math.max(2, Math.round((y1 - y0) * scale));
   const actx = area.getContext('2d', { willReadFrequently: true })!;
   actx.imageSmoothingQuality = 'high';
-  actx.drawImage(video, x0, y0, x1 - x0, y1 - y0, 0, 0, area.width, area.height);
+  actx.drawImage(snap.frame, x0, y0, x1 - x0, y1 - y0, 0, 0, area.width, area.height);
   const local = q.map((p) => ({ x: (p.x - x0) * (area.width / (x1 - x0)), y: (p.y - y0) * (area.height / (y1 - y0)) })) as Quad;
 
   const canvas = document.createElement('canvas');

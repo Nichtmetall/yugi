@@ -3,7 +3,7 @@ import { imageUrl } from '../api/ygoprodeck';
 import { useStore } from '../lib/store';
 import { cardName } from '../lib/format';
 import { findCard, getOcrWorker, grabCard, grabQuad, inspectCard, onOcrStatus, readCard, signatureDiff, snapshot } from '../scan/ocr';
-import { homography, project, quadShift, quadSignature, rectQuad, type Point, type Quad } from '../scan/detect';
+import { homography, project, quadArea, quadShift, quadSignature, rectQuad, type Point, type Quad } from '../scan/detect';
 import { observe, rankCandidates, verdict, type Candidate, type Observation } from '../scan/recognize';
 import { addToCollection, changeQty } from '../state/collection';
 import { addCardToDeck, decksStore, defaultSection, removeCardFromDeck, SECTION_LABEL } from '../state/decks';
@@ -29,7 +29,8 @@ type Dock =
   | { kind: 'pick'; candidates: Candidate[]; sure: boolean }
   | { kind: 'added'; id: number };
 
-const TICK_MS = 150;
+/** Pause zwischen zwei Kartensuchen; die Suche selbst dauert auf dem Handy etwa 50 bis 150 ms. */
+const TICK_MS = 60;
 /** Mittlere Helligkeitsabweichung zwischen zwei Proben, unter der das Bild als ruhig gilt. */
 const STEADY = 8;
 /** Darunter liegt noch dieselbe Karte im Rahmen wie beim letzten Lesen. */
@@ -44,10 +45,19 @@ const SHARP_KEEP = 0.7;
 const GLARE = 0.04;
 /** Dauer der Haken-Animation nach dem Hinzufuegen. */
 const CHECK_MS = 900;
-/** Mittlere Eckenverschiebung (Schnappschuss-Pixel) zwischen zwei Proben, unter der eine erkannte Karte als ruhig gilt. */
-const STEADY_SHIFT = 2.5;
-/** So viele Proben ohne Karte, bis der Rahmen in die Mitte zurueckkehrt: kurze Aussetzer lassen ihn nicht flackern. */
-const LOST_TICKS = 3;
+/**
+ * Geschwindigkeit der Ecken (Kartengroessen je Sekunde), unter der eine erkannte Karte als ruhig gilt: Bei 1/30 s
+ * Belichtung verwischt das um weniger als 0,3 % der Karte. Wo sie liegt, ist egal, gelesen wird aus demselben Bild.
+ */
+const STEADY_SPEED = 0.08;
+/** So lange ohne Karte, bis der Rahmen in die Mitte zurueckkehrt: Aussetzer (Bewegungsunschaerfe) lassen ihn nicht flackern. */
+const LOST_MS = 600;
+/**
+ * Aendert sich die Flaeche der erkannten Karte von einem Bild zum naechsten um mehr als diesen Faktor (log), zaehlt das
+ * erst, wenn das naechste Bild es bestaetigt: Ein einzelnes Bild mit einem inneren Rechteck (Bildfeld, waehrend die
+ * Karte halb aus dem Bild ragt) laesst den Rahmen nicht springen.
+ */
+const JUMP = Math.log(1.25);
 /** Zeitkonstante, mit der der Rahmen der Karte nachgleitet. */
 const FOLLOW_MS = 70;
 
@@ -366,7 +376,8 @@ export function ScanPage() {
     };
 
     let prevQuad: Quad | null = null;
-    let lost = 0;
+    let prevAt = 0;
+    let seenAt = 0;
     /** Laeuft gerade eine Texterkennung? Der Rahmen folgt der Karte trotzdem weiter. */
     let busy = false;
 
@@ -377,21 +388,29 @@ export function ScanPage() {
         const g = geometry();
         if (document.hidden || detailStore.get() || !video?.videoWidth || !g) continue;
 
+        const at = performance.now();
         const snap = snapshot(video, g.view);
-        const quad = await findCard(snap.px, prevQuad);
+        let quad = await findCard(snap.px, prevQuad);
         if (stop) break;
+        if (quad && prevQuad && Math.abs(Math.log(quadArea(quad) / quadArea(prevQuad))) > JUMP) quad = null;
         if (quad) {
-          lost = 0;
+          seenAt = at;
           cardQuadRef.current = quad.map((p) => ({ x: p.x * snap.scale, y: p.y * snap.scale })) as Quad;
-        } else if (++lost > LOST_TICKS) cardQuadRef.current = null;
+        } else if (at - seenAt > LOST_MS) cardQuadRef.current = null;
 
         // Bei erkannter Karte die entzerrte Karte vergleichen: Verschieben im Bild ist dann kein Kartenwechsel.
         const s = 1 / snap.scale;
         const sig = quadSignature(snap.px, quad ?? rectQuad(g.frame.x * s, g.frame.y * s, g.frame.w * s, g.frame.h * s));
-        const moved = quad && prevQuad ? quadShift(quad, prevQuad) : quad || prevQuad ? Infinity : 0;
-        const steady = prevSig !== null && signatureDiff(sig, prevSig) < STEADY && moved < STEADY_SHIFT;
+        const speed =
+          quad && prevQuad
+            ? (quadShift(quad, prevQuad) / Math.sqrt(quadArea(quad)) / Math.max(1, at - prevAt)) * 1000
+            : quad || prevQuad
+              ? Infinity
+              : 0;
+        const steady = prevSig !== null && signatureDiff(sig, prevSig) < STEADY && speed < STEADY_SPEED;
         prevSig = sig;
         prevQuad = quad;
+        prevAt = at;
         if (busy) continue;
         const force = forceRef.current;
 
@@ -409,7 +428,7 @@ export function ScanPage() {
         const patient = !force && performance.now() - waitingSince < MAX_WAIT_MS;
         if (!steady && patient) continue;
 
-        const card = quad ? grabQuad(video, snap, quad) : grabCard(video, g.frame, g.view);
+        const card = quad ? grabQuad(snap, quad) : grabCard(snap, g.frame, g.view);
         const quality = inspectCard(card);
         // Ruhig, aber deutlich unschaerfer als schon gesehen (Fokus sucht noch): auf ein besseres Bild warten.
         if (patient && quality.sharpness < bestSharp * SHARP_KEEP) continue;
