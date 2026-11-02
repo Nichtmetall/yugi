@@ -17,7 +17,9 @@ function rng(seed: number) {
 function cardColor(u: number, v: number, seed: number): Rgb {
   if (u < 0.03 || u > 0.97 || v < 0.022 || v > 0.978) return [55, 58, 80];
   if (v > 0.04 && v < 0.098 && u > 0.06 && u < 0.94) return Math.floor(v * 400) % 3 === 0 && u < 0.7 ? [40, 30, 20] : [205, 150, 85];
-  if (u > 0.11 && u < 0.89 && v > 0.18 && v < 0.73) {
+  if (u > 0.1 && u < 0.9 && v > 0.172 && v < 0.74) {
+    // Fase um das Bildfeld: oben zwei Kanten wie bei echten Karten
+    if (u < 0.11 || u > 0.89 || v < 0.181 || v > 0.73) return [125, 80, 50];
     // Artwork: weiche Formen ohne lange gerade Kanten
     const a = Math.sin(u * 11 + seed) + Math.cos(v * 13 - seed * 0.7) + Math.sin((u + v) * 7 * (1 + (seed % 3)));
     return [120 + a * 40, 90 + a * 25, 140 - a * 35];
@@ -26,17 +28,37 @@ function cardColor(u: number, v: number, seed: number): Rgb {
   return [190, 110, 60];
 }
 
-/** Szene: Hintergrund mit Rauschen, Karte in `quad` (4 x 4 Unterabtastung fuer weiche Kanten wie bei einer Kamera). */
-function scene(w: number, h: number, quad: Quad | null, bg: (x: number, y: number) => Rgb, seed = 1): Pixels {
+/** Liegt der Punkt im Einheitsquadrat? */
+const inUnit = (p: { x: number; y: number } | null) => !!p && p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1;
+
+/**
+ * Szene: Hintergrund mit Rauschen, Karte in `quad`, optional in einer Huelle (4 x 4 Unterabtastung fuer weiche Kanten
+ * wie bei einer Kamera).
+ */
+function scene(
+  w: number,
+  h: number,
+  quad: Quad | null,
+  bg: (x: number, y: number) => Rgb,
+  seed = 1,
+  sleeve?: { quad: Quad; color: Rgb },
+): Pixels {
   const data = new Uint8ClampedArray(w * h * 4);
   const toCard = quad ? homography(quad, rectQuad(0, 0, 1, 1)) : null;
+  const toSleeve = sleeve ? homography(sleeve.quad, rectQuad(0, 0, 1, 1)) : null;
   const noise = rng(seed);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const acc = [0, 0, 0];
       for (let s = 0; s < 16; s++) {
-        const p = toCard && project(toCard, x + ((s % 4) + 0.5) / 4, y + ((s >> 2) + 0.5) / 4);
-        const c = p && p.x >= 0 && p.x <= 1 && p.y >= 0 && p.y <= 1 ? cardColor(p.x, p.y, seed) : bg(x, y);
+        const sx = x + ((s % 4) + 0.5) / 4;
+        const sy = y + ((s >> 2) + 0.5) / 4;
+        const p = toCard && project(toCard, sx, sy);
+        const c = inUnit(p)
+          ? cardColor(p!.x, p!.y, seed)
+          : toSleeve && inUnit(project(toSleeve, sx, sy))
+            ? sleeve!.color
+            : bg(x, y);
         for (let k = 0; k < 3; k++) acc[k] += c[k] / 16;
       }
       const n = (noise() - 0.5) * 12;
@@ -104,6 +126,26 @@ test('detectCard bleibt auf Holzmaserung an der Kartenkante', () => {
   const found = detectCard(scene(320, 420, truth, wood, 5));
   assert.ok(found, 'keine Karte gefunden');
   assert.ok(cornerError(found, truth) < 0.02, `Ecken zu ungenau: ${cornerError(found, truth)}`);
+});
+
+test('detectCard findet die Karte in einer Huelle, nicht den Huellenrand', () => {
+  const truth: Quad = [
+    { x: 92, y: 70 },
+    { x: 236, y: 92 },
+    { x: 222, y: 330 },
+    { x: 58, y: 302 },
+  ];
+  // Huelle 62 x 89 mm um die Karte (59 x 86 mm), Karte seitlich mittig und fast unten
+  const toImage = homography(rectQuad(0, 0, 1, 1), truth);
+  const sleeve = rectQuad(-1.5 / 59, -2.5 / 86, 62 / 59, 89 / 86).map((p) => project(toImage, p.x, p.y)) as Quad;
+  for (const [bg, color] of [
+    [table, [20, 20, 26]],
+    [wood, [30, 45, 120]],
+  ] as const) {
+    const found = detectCard(scene(320, 420, truth, bg, 3, { quad: sleeve, color: [...color] }));
+    assert.ok(found, 'keine Karte gefunden');
+    assert.ok(cornerError(found, truth) < 0.015, `Ecken zu ungenau: ${cornerError(found, truth)}`);
+  }
 });
 
 test('detectCard meldet nichts ohne Karte und bei angeschnittener Karte', () => {

@@ -415,6 +415,92 @@ function outerSides(options: SideOption[][]): SideOption[] {
   return sides;
 }
 
+// ---------- Huelle ----------
+
+/** Breite des grauen Aussenrands bis zur gedruckten Rahmenkante je Seite (oben, rechts, unten, links). */
+const BORDER = [0.021, 0.029, 0.021, 0.029];
+/**
+ * Abstand der beiden Kanten des Bildfelds (Fase) von der oberen Rahmenkante. Wie BORDER Anteile der Kartenausdehnung,
+ * gemessen an Scans echter Karten aller Rahmenarten: Zur Rahmenkante streut der Abstand kaum, zur Schnittkante um 1 %
+ * (Fehlschnitt), so viel wie der Rand einer Huelle breit ist.
+ */
+const TOP_ART = [0.151, 0.16];
+/** So weit darf die Rahmenkante innerhalb der Aussenkante liegen: Huelle plus Rand. */
+const FRAME_REACH = 0.08;
+/** Mittlere Belegung der beiden Bildfeldkanten, ab der eine Rahmenkante als gefunden gilt. */
+const ART_MIN = 0.5;
+/**
+ * Rahmenkanten, deren Bildfeldkanten kaum schlechter belegt sind als bei der besten, gelten als gleich gut: Die Fase
+ * hat mehrere Linien in gleichem Abstand, das Muster passt daher auch um eine Linie versetzt.
+ */
+const ART_TIE = 0.15;
+/** Erlaubte Abweichung der Schnittkante vom Sollabstand zur Rahmenkante (Fehlschnitt, Messfehler). */
+const BORDER_TOLERANCE = 0.012;
+/** Seitlicher Rand einer Huelle: schmaler verschmilzt er mit der Kartenkante, breiter ist er nicht. */
+const SLEEVE_MIN = 0.008;
+const SLEEVE_MAX = 0.045;
+/** Mindestbelegung der Kartenkante in der Huelle relativ zum Huellenrand. */
+const SLEEVE_SUPPORT = 0.75;
+
+/** Mittlere Belegung der Bildfeldkanten, wenn die obere Seite von `quad` die Rahmenkante ist. */
+function artSupport(e: Edges, quad: Quad): number {
+  const hm = homography(rectQuad(0, 0, 1, 1), quad);
+  let sum = 0;
+  for (const d of TOP_ART) {
+    // Das Viereck reicht von der Rahmenkante bis zur unteren Schnittkante.
+    const t = d / (1 - BORDER[0]);
+    sum += sideSupport(e, project(hm, 0.2, t), project(hm, 0.8, t), 1, 0, 1);
+  }
+  return sum / TOP_ART.length;
+}
+
+/**
+ * Liegt die Karte in einer Huelle, ist deren Rand so breit wie der graue Aussenrand der Karte, und die Suche nach der
+ * Aussenkante landet auf der Huelle. Oben ist das sicher zu erkennen: Dort liegt das Bildfeld in festem Abstand zur
+ * gedruckten Rahmenkante, und die Kartenkante ist die Kante um den Rand davor. Seitlich ist das Muster zu dicht fuer
+ * das kleine Suchbild; steckt die Karte oben in einer Huelle, ruecken die Seiten auf die naechste Kante nach innen,
+ * hinter der im Abstand des Rands die Rahmenkante liegt. Unten bleibt die Aussenkante: Rahmen, Textfeld und ATK/DEF-
+ * Linie haben dort gleiche Abstaende, und die Karte liegt meist unten in der Huelle.
+ */
+function unsleeve(e: Edges, options: SideOption[][], sides: SideOption[]): SideOption[] {
+  const out = [...sides];
+  const top = out[0];
+  const frames = options[0]
+    .filter((o) => o.shift <= top.shift && top.shift - o.shift <= FRAME_REACH)
+    .map((o) => {
+      const quad = cornersOf(out.map((s, i) => (i === 0 ? o : s)).map((s) => lineThrough(s.a, s.b)));
+      return { o, s: quad ? artSupport(e, quad) : 0 };
+    });
+  const best = Math.max(0, ...frames.map((f) => f.s));
+  if (best < ART_MIN) return out;
+  /** Kante im Abstand des Rands vor der Rahmenkante f. */
+  const edgeFor = (k: number, f: SideOption) =>
+    options[k]
+      .filter((o) => o.shift <= out[k].shift && Math.abs(o.shift - f.shift - BORDER[k]) <= BORDER_TOLERANCE)
+      .sort((p, q) => Math.abs(p.shift - f.shift - BORDER[k]) - Math.abs(q.shift - f.shift - BORDER[k]))[0];
+  // Von aussen nach innen; ohne Huelle passt die Aussenkante schon zu einer davon.
+  const near = frames.filter((f) => f.s >= best - ART_TIE).reverse();
+  if (near.some((f) => edgeFor(0, f.o) === top)) return out;
+  const edge = near.map((f) => edgeFor(0, f.o)).find((o) => o);
+  if (!edge) return out;
+  out[0] = edge;
+  for (const k of [1, 3]) {
+    const cur = out[k];
+    // Optionen sind von innen nach aussen sortiert.
+    const inner = options[k]
+      .filter(
+        (o) =>
+          cur.shift - o.shift >= SLEEVE_MIN &&
+          cur.shift - o.shift <= SLEEVE_MAX &&
+          o.support >= SLEEVE_SUPPORT * cur.support &&
+          options[k].some((f) => Math.abs(o.shift - f.shift - BORDER[k]) <= BORDER_TOLERANCE),
+      )
+      .pop();
+    if (inner) out[k] = inner;
+  }
+  return out;
+}
+
 const lineThrough = (a: Point, b: Point): Line => {
   const len = dist(a, b);
   const t = normalAngle((b.x - a.x) / len, (b.y - a.y) / len);
@@ -482,7 +568,8 @@ function insideSpread(colors: number[][]): number {
   return Math.max(...colors.map((c, k) => colorDiff(c, median3(colors.filter((_, i) => i !== k)))));
 }
 
-const area = (q: Quad) => q.reduce((s, p, i) => s + p.x * q[(i + 1) % 4].y - q[(i + 1) % 4].x * p.y, 0) / 2;
+/** Flaeche (Ecken im Uhrzeigersinn). */
+export const quadArea = (q: Quad) => q.reduce((s, p, i) => s + p.x * q[(i + 1) % 4].y - q[(i + 1) % 4].x * p.y, 0) / 2;
 
 /** Liegt `inner` (bis auf 1 px) in `outer`? Beide konvex, Ecken im Uhrzeigersinn. */
 function contains(outer: Quad, inner: Quad): boolean {
@@ -597,13 +684,15 @@ export function detectCard(px: Pixels, prev?: Quad | null): Quad | null {
   let best = found[0];
   for (const c of found) {
     if (c.score < found[0].score - NEST_MARGIN) break;
-    if (c.spread <= INSIDE_TOLERANCE && area(c.quad) > area(best.quad) && contains(c.quad, best.quad)) best = c;
+    if (c.spread <= INSIDE_TOLERANCE && quadArea(c.quad) > quadArea(best.quad) && contains(c.quad, best.quad)) best = c;
   }
 
   // Jede Seite auf die Aussenkante bringen.
   const q = best.quad;
   const { width, height } = sideLengths(q);
-  const sides = outerSides(q.map((c, k) => sideOptions(e, px, c, q[(k + 1) % 4], k % 2 ? width : height)));
+  const size = [height, width, height, width];
+  const options = q.map((c, k) => sideOptions(e, px, c, q[(k + 1) % 4], size[k]));
+  const sides = unsleeve(e, options, outerSides(options));
   const coarse = cornersOf(sides.map((s) => lineThrough(s.a, s.b)));
   if (!coarse) return q;
   const { width: cw, height: ch } = sideLengths(coarse);
